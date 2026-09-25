@@ -1,0 +1,327 @@
+﻿namespace Nikse.SubtitleEdit.Logic.Config.Language.Main;
+
+public class LanguageMain
+{
+    public LanguageMainMenu Menu { get; set; } = new();
+    public LanguageMainToolbar Toolbar { get; set; } = new();
+    public LanguageMainWaveform Waveform { get; set; } = new();
+
+    public string AudioTrackIsNowX { get; set; }
+    public string AudioTrackX { get; set; }
+    public string AutoBreakHint { get; set; }
+    public string CharactersPerSecond { get; set; }
+    public string ChooseColumn { get; set; }
+    public string ColumnPaste { get; set; }
+    public string CreatedEmptyTranslation { get; set; }
+    public string DeleteText { get; set; }
+    public string DeleteTextAndShiftCellsUp { get; set; }
+    public string EndTimeMustBeAfterStartTime { get; set; }
+    public string ErrorLoad7Zip { get; set; }
+    public string ErrorLoadBinaryZeroes { get; set; }
+    public string ErrorLoadGZip { get; set; }
+    public string ErrorLoadLargeFile { get; set; }
+    public string ErrorLoadVideoFilePrompt { get; set; }
+    public string ErrorLoadJpg { get; set; }
+    public string ErrorLoadPng { get; set; }
+    public string ErrorLoadRar { get; set; }
+    public string ErrorLoadRawPgsPrompt { get; set; }
+    public string ErrorLoadSrr { get; set; }
+    public string ErrorLoadTorrent { get; set; }
+    public string ErrorLoadZip { get; set; }
+    public string ExtractingWaveInfo { get; set; }
+    public string ExtractingShotChanges { get; set; }
+    public string FailedToExtractWaveInfo { get; set; }
+    public string FixedRightToLeftUsingUnicodeControlCharactersX { get; set; }
+    public string GeneratingSpectrogramDotDotDot { get; set; }
+    public string GeneratingWaveformDotDotDot { get; set; }
+    public string InsertEmptyTextAndShiftCellsDown { get; set; }
+    public string InsertTextFromSubtitleDotDotDot { get; set; }
+    public string CopyTextFromOriginalToCurrent { get; set; }
+    public string InsertedXTextsFromSubtitleY { get; set; }
+    public string ItalicHint { get; set; }
+    public string JoinedSubtitleLoaded { get; set; }
+    public string LineXTextAndTimingChanged { get; set; }
+    public string LineXTextChangedFromYToZ { get; set; }
+    public string LineXTimingChanged { get; set; }
+    public string LoadingWaveInfoFromCache { get; set; }
+    public string ClickToGenerateWaveform { get; set; }
+    public string WaveformFfmpegNotFoundClickToSetUp { get; set; }
+    public string NoTextInClipboard { get; set; }
+    public string NumberOfLinesEvenlyDistributedX { get; set; }
+    public string OneLineCopiedFromOriginal { get; set; }
+    public string OneLineCopiedToOriginal { get; set; }
+    public string OnlineOnlyVideo { get; set; }
+    public string OnlineOnlyVideoXSizeYDownloadAndOpen { get; set; }
+    public string OneLineMerged { get; set; }
+    public string OneLineSwitched { get; set; }
+    public string OverwriteExistingCells { get; set; }
+    public string OverwriteOrShiftCellsDown { get; set; }
+    public string ParsingMatroskaFile { get; set; }
+    public string PasteFromClipboardDotDotDot { get; set; }
+    public string RedoPerformed { get; set; }
+    public string RedoPerformedXActionLeft { get; set; }
+    public string RemovedUnicodeControlCharactersX { get; set; }
+    public string RemovedXBlankLines { get; set; }
+    public string ReplacedXWithYCountZ { get; set; }
+    public string ReversedStartAndEndingsForRightToLeftX { get; set; }
+    public string RuleProfileIsX { get; set; }
+    public string SaveLanguageFile { get; set; }
+    public string SaveXFileAs { get; set; }
+    public string ShiftTextCellsDown { get; set; }
+    public string SingleLineLength { get; set; }
+    public string SpeedIsNowX { get; set; }
+    public string SubtitleGridFormattingX { get; set; }
+    public string SubtitleImportedFromMatroskaFile { get; set; }
+    public string TextDown { get; set; }
+    public string TextOnly { get; set; }
+    public string TextUp { get; set; }
+    public string TimeCodesOnly { get; set; }
+    public string XPropertiesDotDotDot { get; set; }
+    public string TotalCharacters { get; set; }
+    public string UnbreakHint { get; set; }
+    public string UndoPerformed { get; set; }
+    public string UndoPerformedXActionLeft { get; set; }
+    public string VideoAndWaveformPreviewTextX { get; set; }
+    public string XLinesCopiedFromOriginal { get; set; }
+    public string XLinesCopiedToOriginal { get; set; }
+    public string XLinesMerged { get; set; }
+    public string XLinesSelectedOfY { get; set; }
+    public string XLinesSwitched { get; set; }
+    public string XShotChangedLoaded { get; set; }
+    public string YoutubeDlDownloadedSuccessfully { get; set; }
+    public string YoutubeDlNotInstalledDownloadNow { get; set; }
+    public string PromptInsertSubtitleOverlap { get; set; }
+    public string YoutubeDlOutdatedDownloadNow { get; set; }
+    public string InsertUnicodeSymbol { get; set; }
+    public string TrimmedXLines { get; set; }
+    public string PastedXLinesOverSelectedLines { get; set; }
+    public string PastedXOfYLinesOverSelectedLines { get; set; }
+    public string OpenOriginalDifferentNumberOfSubtitlesXY { get; set; }
+    public string OriginalTextReadOnly { get; set; }
+    public string OriginalTextEditMode { get; set; }
+    public string OriginalIsReadOnlyNotSaved { get; set; }
+    public string OriginalIsEmptyNotSaved { get; set; }
+    public string OriginalIsReadOnlyReference { get; set; }
+    public string AllowEditOfOriginalSubtitle { get; set; }
+    public string ShowAllOriginalLinesX { get; set; }
+    public string ShowAllOriginalLinesHint { get; set; }
+    public string ShowAllOriginalLinesNote { get; set; }
+    public string ShowMatchingOriginalLinesX { get; set; }
+    public string ShowMatchingOriginalLinesHint { get; set; }
+    public string ShowMatchingOriginalLinesNote { get; set; }
+    public string AllowEditHintReadOnly { get; set; }
+    public string AllowEditHintAllLines { get; set; }
+    public string AllowEditHintMatchingOnlyX { get; set; }
+    public string VideoOpenedChangeLayoutQuestion { get; set; }
+    public string SortedByStartTime { get; set; }
+    public string SortedByEndTime { get; set; }
+    public string SortedByNumber { get; set; }
+    public string SortedByDuration { get; set; }
+    public string SortedByGap { get; set; }
+    public string SortedByText { get; set; }
+    public string SortedByTextTotalLength { get; set; }
+    public string SortedBySingleLineMaxLength { get; set; }
+    public string SortedByCps { get; set; }
+    public string SortedByWpm { get; set; }
+    public string SortedByNumberOfLines { get; set; }
+    public string SortedByActor { get; set; }
+    public string SortedByStyle { get; set; }
+    public string VideoBrightnessSetTo { get; set; }
+    public string VideoContrastSetTo { get; set; }
+    public string ColorHint { get; set; }
+    public string RemoveFormattingHint { get; set; }
+    public string AssaResolutionResamplerDone { get; set; }
+    public string SnappedXTimesToFrames { get; set; }
+    public string LanguageFileSavedToX { get; set; }
+    public string FileExportedInFormatXToY { get; set; }
+    public string FileExportedInFormatXToFileY { get; set; }
+    public string FixedXLines { get; set; }
+    public string TranscriptionCompletedWithXLines { get; set; }
+    public string OpenSubtitleFileX { get; set; }
+    public string ReplacedXOccurrences { get; set; }
+    public string FfmpegDownloadedAndInstalledToX { get; set; }
+    public string NothingToSave { get; set; }
+    public string FormatLimitWarningTitle { get; set; }
+    public string FormatLimitWarningXLinesExceedLimitsOfY { get; set; }
+    public string FormatLimitWarningMaxXCharactersPerLine { get; set; }
+    public string FormatLimitWarningMaxXLines { get; set; }
+    public string FormatLimitWarningTextWillBeRewrapped { get; set; }
+    public string FormatLimitWarningLinesX { get; set; }
+    public string FormatLimitWarningSaveAnyway { get; set; }
+    public string FormatLimitWarningDoNotShowAgain { get; set; }
+    public string NothingToSaveOriginal { get; set; }
+    public string LiveSpellCheckLanguageXLoaded { get; set; }
+    public string DownloadFfmpegTitle { get; set; }
+    public string DownloadFfmpegQuestion { get; set; }
+    public string FfmpegNotFoundInstallHint { get; set; }
+    public string SelectCurrentSubtitleWhilePlayingOn  { get; set; }
+    public string SelectCurrentSubtitleWhilePlayingOff  { get; set; }
+    public string SetUpLikeSe4Question { get; set; }
+    public string SetUpLikeSe4ImportedSettingsX { get; set; }
+    public string SetUpLikeSe4NoSettingsXmlFound { get; set; }
+    public string SetUpLikeSe4ShortcutsAddedX { get; set; }
+    public string SetUpLikeSe4ShortcutsSkippedX { get; set; }
+    public string SetUpLikeSe4ReplaceRulesAddedXY { get; set; }
+    public string SetUpLikeSe4ThemeSet { get; set; }
+
+    public LanguageMain()
+    {
+        AudioTrackIsNowX = "Audio track is now \"{0}\"";
+        AudioTrackX = "Audio track {0}";
+        AutoBreakHint = "Auto-break selected lines";
+        CharactersPerSecond = "Chars/second: {0}";
+        ChooseColumn = "Choose column";
+        ColumnPaste = "Column paste";
+        CreatedEmptyTranslation = "Created empty translation from current subtitle";
+        DeleteText = "Delete text";
+        DeleteTextAndShiftCellsUp = "Delete text and shift cells up";
+        EndTimeMustBeAfterStartTime = "End time must be after start time.";
+        ErrorLoad7Zip = "This file seems to be a compressed 7-Zip file.\n\nSubtitle Edit cannot open compressed files.";
+        ErrorLoadBinaryZeroes = "Sorry, this file contains only binary zeroes!\n\nIf you have edited this file with Subtitle Edit you might be able to find a backup via the menu item File -&gt; Restore auto-backup...";
+        ErrorLoadGZip = "This file seems to be a compressed GZip file.\n\nSubtitle Edit cannot open compressed files.";
+        ErrorLoadLargeFile = "This file is too large to open as a subtitle file.";
+        ErrorLoadVideoFilePrompt = "This file seems to be a video file:\n{0}\n\nYou can open a video via \"Video -> Open video\" or by dragging and dropping a video onto the video player.\n\nDo you want to open it as a video file?";
+        ErrorLoadJpg = "This file seems to be a JPG image file.\n\nSubtitle Edit cannot open image files.";
+        ErrorLoadPng = "This file seems to be a PNG image file.\n\nSubtitle Edit cannot open image files.";
+        ErrorLoadRar = "This file seems to be a compressed 7-Zip file.\n\nSubtitle Edit cannot open compressed files.";
+        ErrorLoadRawPgsPrompt = "This file seems to be a raw PGS stream without the Blu-ray SUP \"PG\" headers, so it contains no timestamps.\n\nThis usually happens when a Matroska PGS track is extracted in \"raw\" mode. For correct timings, re-extract the track in normal track mode (e.g. \"mkvextract tracks\" without --raw), or open the original Matroska file directly in Subtitle Edit.\n\nDo you want to import the subtitle images anyway, with auto-generated placeholder timings that must be fixed manually?";
+        ErrorLoadSrr = "This file seems to be a ReScene SRR file.\n\nSubtitle Edit cannot open SRR files.";
+        ErrorLoadTorrent = "This file seems to be a BitTorrent file.\n\nSubtitle Edit cannot open torrent files.";
+        ErrorLoadZip = "This file seems to be a compressed ZIP file.\n\nSubtitle Edit cannot open compressed files.";
+        ExtractingWaveInfo = "Extracting wave info...";
+        ExtractingShotChanges = "Extracting shot changes...";
+        FailedToExtractWaveInfo = "Failed to extract wave info.";
+        FixedRightToLeftUsingUnicodeControlCharactersX = "Fixed right-to-left using Unicode control characters in {0} lines";
+        GeneratingSpectrogramDotDotDot = "Generating spectrogram...";
+        GeneratingWaveformDotDotDot = "Generating waveform...";
+        InsertEmptyTextAndShiftCellsDown = "Insert empty text and shift cells down";
+        InsertTextFromSubtitleDotDotDot = "Insert text from subtitle...";
+        CopyTextFromOriginalToCurrent = "Copy text from original to current subtitle";
+        InsertedXTextsFromSubtitleY = "Inserted {0} texts from subtitle file \"{1}\"";
+        ItalicHint = "Italic selected lines/text";
+        JoinedSubtitleLoaded = "Joined subtitle loaded";
+        LineXTextAndTimingChanged = "Line {0}: Text and timing changed";
+        LineXTextChangedFromYToZ = "Line {0}: Text changed from \"{1}\" to \"{2}\"";
+        LineXTimingChanged = "Line {0}: Timing changed";
+        LoadingWaveInfoFromCache = "Loading wave info from cache...";
+        ClickToGenerateWaveform = "Click to generate waveform";
+        WaveformFfmpegNotFoundClickToSetUp = "FFmpeg not found - click the waveform to set up FFmpeg and generate the waveform";
+        NoTextInClipboard = "No text in clipboard";
+        NumberOfLinesEvenlyDistributedX = "Evenly distributed {0} lines";
+        OneLineCopiedFromOriginal = "One line copied from original subtitle";
+        OneLineCopiedToOriginal = "One line copied to original subtitle";
+        OnlineOnlyVideo = "Online-only video";
+        OnlineOnlyVideoXSizeYDownloadAndOpen = "The video file \"{0}\" ({1}) is stored online only, for example in Dropbox or iCloud Drive, and has to be downloaded before it can be opened.\n\nDownload and open it now?";
+        OneLineMerged = "One line merged";
+        OneLineSwitched = "One line switched";
+        OverwriteExistingCells = "Overwrite existing cells";
+        OverwriteOrShiftCellsDown = "Overwrite/shift cells down";
+        ParsingMatroskaFile = "Parsing Matroska file...";
+        PasteFromClipboardDotDotDot = "Paste from clipboard...";
+        RedoPerformed = "Redo performed";
+        RedoPerformedXActionLeft = "Redo performed (actions left: {0})";
+        RemovedUnicodeControlCharactersX = "Removed Unicode control characters from {0} lines";
+        RemovedXBlankLines = "Removed {0} blank lines";
+        ReplacedXWithYCountZ = "Replaced \"{0}\" with \"{1}\" ({2} occurrences)";
+        ReversedStartAndEndingsForRightToLeftX = "Reversed start and endings for right-to-left in {0} lines";
+        RuleProfileIsX = "Rule profile is now \"{0}\"";
+        SaveLanguageFile = "Save language file";
+        SaveXFileAs = "Save {0} file as";
+        ShiftTextCellsDown = "Shift text cells down";
+        SingleLineLength = "Line length: ";
+        SpeedIsNowX = "Speed is now \"{0}\"";
+        SubtitleGridFormattingX = "Grid formatting: {0}";
+        SubtitleImportedFromMatroskaFile = "Subtitle imported from Matroska file";
+        TextDown = "Text down";
+        TextOnly = "Text only";
+        TextUp = "Text up";
+        TimeCodesOnly = "Time codes only";
+        XPropertiesDotDotDot = "{0} properties...";
+        TotalCharacters = "Total chars: {0}";
+        UnbreakHint = "Unbreak selected lines";
+        UndoPerformed = "Undo performed";
+        UndoPerformedXActionLeft = "Undo performed (actions left: {0})";
+        VideoAndWaveformPreviewTextX = "Video/waveform preview: {0}";
+        XLinesCopiedFromOriginal = "{0} lines copied from original subtitle";
+        XLinesCopiedToOriginal = "{0} lines copied to original subtitle";
+        XLinesMerged = "{0} lines merged";
+        XLinesSelectedOfY = "{0} lines selected of {1}";
+        XLinesSwitched = "{0} lines switched";
+        XShotChangedLoaded = "{0} shot changes loaded";
+        YoutubeDlDownloadedSuccessfully = "\"yt-dlp\" downloaded successfully.";
+        YoutubeDlNotInstalledDownloadNow = "\"yt-dlp\" is not installed and is required for playing online videos.\n\nDownload now?";
+        PromptInsertSubtitleOverlap = "The inserted lines will overlap existing lines.\n\nInsert anyway?";
+        YoutubeDlOutdatedDownloadNow = "\"yt-dlp\" is outdated and may not work with online videos.\n\nDownload the current version now?";
+        InsertUnicodeSymbol = "Insert Unicode symbol";
+        TrimmedXLines = "Trimmed {0} subtitle lines";
+        PastedXLinesOverSelectedLines = "Pasted {0} line(s) over the selected lines";
+        PastedXOfYLinesOverSelectedLines = "Pasted {0} of {1} line(s) over the selected lines - the rest did not fit the selection";
+        OpenOriginalDifferentNumberOfSubtitlesXY = "The original subtitle file does not have the same number of subtitles as the current subtitle file.\n\n• Original subtitles: {0}\n• Current subtitles: {1}";
+        OriginalTextReadOnly = "Original text (read-only)";
+        OriginalTextEditMode = "Original text (edit mode)";
+        OriginalIsReadOnlyNotSaved = "The original subtitle is a read-only reference and was not saved";
+        OriginalIsEmptyNotSaved = "The original subtitle has no text at all and was not saved";
+        OriginalIsReadOnlyReference = "The original subtitle is open as a read-only reference";
+        AllowEditOfOriginalSubtitle = "Allow edit of original subtitle";
+        ShowAllOriginalLinesX = "Show all original lines ({0} have no match here)";
+        ShowAllOriginalLinesHint = "The lines with no match are shown as extra rows, so you can see what the translation is missing.";
+        ShowAllOriginalLinesNote = "Type in an extra row to add that line to your subtitle";
+        ShowMatchingOriginalLinesX = "Show only the {0} matching original lines";
+        ShowMatchingOriginalLinesHint = "The other {0} original lines are not shown anywhere.";
+        ShowMatchingOriginalLinesNote = "They stay in the file unless you save the original";
+        AllowEditHintReadOnly = "The original is shown read-only and is never saved, so its file cannot change.";
+        AllowEditHintAllLines = "The whole original is on screen, so saving it keeps every line.";
+        AllowEditHintMatchingOnlyX = "Saving the original would write only the lines shown - the other {0} would be lost.";
+        VideoOpenedChangeLayoutQuestion = "A video file has been opened.\n\nDo you want to change the layout to show the video panel?";
+        SortedByStartTime = "Sorted by \"Show\" time";
+        SortedByEndTime = "Sorted by \"Hide\" time";
+        SortedByNumber = "Sorted by number";
+        SortedByDuration = "Sorted by duration";
+        SortedByGap = "Sorted by gap";
+        SortedByText = "Sorted by text";
+        SortedByTextTotalLength = "Sorted by text total length";
+        SortedBySingleLineMaxLength = "Sorted by single line max length";
+        SortedByCps = "Sorted by chars/sec";
+        SortedByWpm = "Sorted by words/min";
+        SortedByNumberOfLines = "Sorted by number of lines";
+        SortedByActor = "Sorted by actor";
+        SortedByStyle = "Sorted by style";
+        VideoBrightnessSetTo = "Brightness: {0}";
+        VideoContrastSetTo = "Contrast: {0}";
+        ColorHint = "Color selected lines";
+        RemoveFormattingHint = "Remove formatting from selected lines";
+        AssaResolutionResamplerDone = "ASSA resolution changed.";
+        SnappedXTimesToFrames = "Snapped {0} time codes to frames at {1:0.###} fps";
+        LanguageFileSavedToX = "Language file saved to {0}";
+        FileExportedInFormatXToY = "File exported in format {0} to {1}";
+        FileExportedInFormatXToFileY = "File exported in format \"{0}\" to file \"{1}\"";
+        FixedXLines = "Fixed {0} lines";
+        TranscriptionCompletedWithXLines = "Transcription completed with {0} lines";
+        OpenSubtitleFileX = "Open subtitle file \"{0}\"?";
+        ReplacedXOccurrences = "Replaced {0} occurrences";
+        FfmpegDownloadedAndInstalledToX = "ffmpeg downloaded and installed to {0}";
+        NothingToSave = "Nothing to save";
+        FormatLimitWarningTitle = "Format limits exceeded";
+        FormatLimitWarningXLinesExceedLimitsOfY = "{0} subtitle(s) exceed the limits of the \"{1}\" format:";
+        FormatLimitWarningMaxXCharactersPerLine = "Max {0} characters per line";
+        FormatLimitWarningMaxXLines = "Max {0} lines per subtitle";
+        FormatLimitWarningTextWillBeRewrapped = "When saved, these subtitles will be re-wrapped or truncated to fit, so the file will not match what is shown here.";
+        FormatLimitWarningLinesX = "Lines: {0}";
+        FormatLimitWarningSaveAnyway = "Save anyway";
+        FormatLimitWarningDoNotShowAgain = "Do not show this warning again";
+        NothingToSaveOriginal = "Nothing to save (original)";
+        LiveSpellCheckLanguageXLoaded = "Live spell check language {0} loaded";
+        DownloadFfmpegTitle = "Download FFmpeg?";
+        DownloadFfmpegQuestion = "FFmpeg is required for playing online videos and for some video editing features.\n\nDownload FFmpeg now?";
+        FfmpegNotFoundInstallHint = "FFmpeg was not found.\n\nPlease install FFmpeg (e.g. via your package manager) so it is available on the PATH, or set the FFmpeg path in Options -> Settings.";
+        SelectCurrentSubtitleWhilePlayingOn = "Select current subtitle while playing: ON";
+        SelectCurrentSubtitleWhilePlayingOff = "Select current subtitle while playing: OFF";
+        SetUpLikeSe4Question = "This will import Subtitle Edit 4 shortcuts and replace rules and apply the Subtitle Edit 4 theme, toolbar and waveform look.\n\nContinue?";
+        SetUpLikeSe4ImportedSettingsX = "Imported settings from Subtitle Edit 4:\n{0}";
+        SetUpLikeSe4NoSettingsXmlFound = "No Subtitle Edit 4 Settings.xml found - applied Subtitle Edit 4 default values.";
+        SetUpLikeSe4ShortcutsAddedX = "Shortcuts added/updated: {0}";
+        SetUpLikeSe4ShortcutsSkippedX = "Shortcuts skipped (no match): {0}";
+        SetUpLikeSe4ReplaceRulesAddedXY = "Replace rules added: {0} (in {1} new categories)";
+        SetUpLikeSe4ThemeSet = "Theme, toolbar icons and waveform set to the Subtitle Edit 4 look.";
+    }
+}

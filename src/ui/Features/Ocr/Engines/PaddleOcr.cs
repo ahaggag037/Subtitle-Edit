@@ -1,0 +1,879 @@
+﻿using Nikse.SubtitleEdit.Features.Ocr.Download;
+using Nikse.SubtitleEdit.Features.Ocr.Engines;
+using Nikse.SubtitleEdit.Core.Common;
+using Nikse.SubtitleEdit.Logic.Config;
+using Nikse.SubtitleEdit.UiLogic.Ocr.Paddle;
+using SkiaSharp;
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Nikse.SubtitleEdit.Features.Ocr;
+
+public partial class PaddleOcr
+{
+    public string Error { get; set; }
+
+    /// <summary>
+    /// Detected text regions with a recognition confidence below this percentage are
+    /// dropped from the result (0 = keep everything). Off by default so subtitle-bitmap
+    /// OCR is unchanged; Video OCR turns it on, where low-confidence regions are almost
+    /// always background clutter (scene text, logos, edge junk) rather than subtitle text.
+    /// </summary>
+    public int MinConfidencePercent { get; set; }
+
+    private bool _batchRightToLeft;
+    private IProgress<PaddleOcrBatchProgress>? _batchProgress;
+    private List<PaddleOcrBatchInput> _batchFileNames = new List<PaddleOcrBatchInput>();
+    private string _paddingOcrPath;
+    private string _clsPath;
+    private string _detPath;
+    private string _recPath;
+    private readonly Stopwatch _batchStopwatch = new();
+    private readonly StringBuilder _errorOutput = new();
+    private readonly Lock _errorLock = new();
+
+    // The pinned PaddleOCR-Standalone release. Bumping it means updating this one line and
+    // the file names below - and Se.PaddleOcrFolder when the underlying PaddleOCR version
+    // changes, so engine and models never mix across releases.
+    private const string StandaloneRelease = "https://github.com/timminator/PaddleOCR-Standalone/releases/download/v3.7.0/";
+
+    /// <summary>
+    /// One downloadable Paddle OCR archive: the file(s) to fetch, and the folder level inside
+    /// the archive that the extractor has to strip. Keeping the two together is what stops a
+    /// version bump from updating the URL but leaving the unpack looking for the old folder.
+    /// </summary>
+    public sealed record PaddleOcrArchive(IReadOnlyList<string> Urls, string RootFolderInArchive);
+
+    public static PaddleOcrArchive GetArchive(PaddleOcrDownloadType downloadType)
+    {
+        return downloadType switch
+        {
+            PaddleOcrDownloadType.Models => Archive("PaddleOCR.PP-OCRv6.support.files.VideOCR.7z", "PaddleOCR.PP-OCRv6.support.files"),
+            PaddleOcrDownloadType.EngineCpu => Archive("PaddleOCR-CPU-v3.7.0.7z"),
+            PaddleOcrDownloadType.EngineGpu11 => Archive("PaddleOCR-GPU-v3.7.0-CUDA-11.8.7z"),
+            PaddleOcrDownloadType.EngineGpu12 => Archive("PaddleOCR-GPU-v3.7.0-CUDA-12.9.7z"),
+            PaddleOcrDownloadType.EngineCpuLinux => Archive("PaddleOCR-CPU-v3.7.0-Linux.7z"),
+            PaddleOcrDownloadType.EngineGpu11Linux => Archive("PaddleOCR-GPU-v3.7.0-CUDA-11.8-Linux.7z"),
+
+            // Split into two volumes upstream. Both have to land in the same folder before the
+            // .001 is handed to the extractor - the download queue takes care of that.
+            PaddleOcrDownloadType.EngineGpu12Linux => Archive(
+                "PaddleOCR-GPU-v3.7.0-CUDA-12.9-Linux.7z.001",
+                "PaddleOCR-GPU-v3.7.0-CUDA-12.9-Linux",
+                "PaddleOCR-GPU-v3.7.0-CUDA-12.9-Linux.7z.002"),
+
+            _ => throw new ArgumentOutOfRangeException(nameof(downloadType), downloadType, "Unknown Paddle OCR download type"),
+        };
+    }
+
+    // The engine archives all wrap their content in a folder named after the archive itself,
+    // so the root folder is derived rather than repeated; the models archive is the one that
+    // does not follow that rule (".VideOCR" is in the file name only) and passes it in.
+    private static PaddleOcrArchive Archive(string fileName, string? rootFolderInArchive = null, params string[] extraFileNames)
+    {
+        var urls = new List<string>(1 + extraFileNames.Length) { StandaloneRelease + fileName };
+        foreach (var extraFileName in extraFileNames)
+        {
+            urls.Add(StandaloneRelease + extraFileName);
+        }
+
+        return new PaddleOcrArchive(urls, rootFolderInArchive ?? fileName[..fileName.IndexOf(".7z", StringComparison.Ordinal)]);
+    }
+
+    // Model-name mapping lives in libse (PaddleOcrModels) so seconv launches the same models.
+    private const string TextlineOrientationModelName = PaddleOcrModels.TextlineOrientationModelName;
+
+    internal static IReadOnlyCollection<string> GetLatinLanguageCodesForTest() => PaddleOcrModels.LatinLanguageCodesForTest;
+
+    internal static IEnumerable<string> GetAllScriptGroupCodesForTest() => PaddleOcrModels.AllScriptGroupCodesForTest;
+
+    public PaddleOcr()
+    {
+        Error = string.Empty;
+        _paddingOcrPath = Se.PaddleOcrModelsFolder;
+        _clsPath = Path.Combine(_paddingOcrPath, "cls");
+        _detPath = Path.Combine(_paddingOcrPath, "det");
+        _recPath = Path.Combine(_paddingOcrPath, "rec");
+    }
+
+    internal static string GetRecName(string language, string mode) => PaddleOcrModels.GetRecName(language, mode);
+
+    internal static string GetDetectionName(string language, string mode) => PaddleOcrModels.GetDetectionName(language, mode);
+
+    internal static SKBitmap MakeTransparentBlack(SKBitmap bitmap)
+    {
+        if (bitmap == null)
+        {
+            throw new ArgumentNullException(nameof(bitmap));
+        }
+
+        var workingBitmap = bitmap.IsImmutable
+            ? new SKBitmap(bitmap.Width, bitmap.Height, bitmap.ColorType, bitmap.AlphaType)
+            : bitmap;
+
+        if (workingBitmap != bitmap)
+        {
+            using var canvas = new SKCanvas(workingBitmap);
+            canvas.DrawBitmap(bitmap, 0, 0);
+        }
+
+        // Runs per subtitle image inside the batch-OCR parallel loop. The old
+        // `workingBitmap.Pixels` get/set pair allocated an SKColor[Width*Height] (8 MB for a
+        // full-HD frame) and copied the whole image twice; for the 32-bit color types this is
+        // an in-place pass over the raw pixel words instead (alpha is the top byte in both
+        // Rgba8888 and Bgra8888, and opaque black is 0xFF000000 in both).
+        if (workingBitmap.ColorType is SKColorType.Rgba8888 or SKColorType.Bgra8888 &&
+            workingBitmap.GetPixels() != IntPtr.Zero)
+        {
+            unsafe
+            {
+                var basePtr = (byte*)workingBitmap.GetPixels();
+                var stride = workingBitmap.RowBytes;
+                var width = workingBitmap.Width;
+                for (var y = 0; y < workingBitmap.Height; y++)
+                {
+                    var row = (uint*)(basePtr + y * stride);
+                    for (var x = 0; x < width; x++)
+                    {
+                        if (row[x] >> 24 < 100)
+                        {
+                            row[x] = 0xFF000000;
+                        }
+                    }
+                }
+            }
+
+            workingBitmap.NotifyPixelsChanged();
+            return workingBitmap;
+        }
+
+        // Fallback for exotic color types: the original Pixels-based version.
+        var colors = workingBitmap.Pixels;
+        var blackOpaque = new SKColor(0, 0, 0, 255);
+
+        for (int i = 0; i < colors.Length; i++)
+        {
+            if (colors[i].Alpha < 100)
+            {
+                colors[i] = blackOpaque;
+            }
+        }
+
+        // Set all pixels back at once
+        workingBitmap.Pixels = colors;
+
+        return workingBitmap;
+    }
+
+
+    public async Task OcrBatch(OcrEngineType engineType, List<PaddleOcrBatchInput> bitmaps, string language,
+        string mode, IProgress<PaddleOcrBatchProgress> progress, CancellationToken cancellationToken)
+    {
+        var detName = GetDetectionName(language, mode);
+        var recName = GetRecName(language, mode);
+        _batchRightToLeft = PaddleOcrModels.IsArabicScript(language);
+        _batchProgress = progress;
+        var folder = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(folder);
+        _batchFileNames = new List<PaddleOcrBatchInput>(bitmaps.Count);
+
+        var batchFileNamesList = new ConcurrentBag<PaddleOcrBatchInput>();
+
+        var parallelOptions = new ParallelOptions
+        {
+            CancellationToken = cancellationToken,
+            MaxDegreeOfParallelism = Environment.ProcessorCount // Adjust as needed
+        };
+
+        await Parallel.ForEachAsync(bitmaps, parallelOptions, async (input, ct) =>
+        {
+            if (input.Bitmap == null && !string.IsNullOrEmpty(input.SourceFileName))
+            {
+                // Image is already a file on disk (e.g. a video frame) - just copy it.
+                try
+                {
+                    var tempImageFromFile = Path.Combine(folder,
+                        input.Index.ToString("0000") + Path.GetExtension(input.SourceFileName));
+                    File.Copy(input.SourceFileName, tempImageFromFile, true);
+                    input.FileName = tempImageFromFile;
+                    batchFileNamesList.Add(input);
+                }
+                catch
+                {
+                    // ignore
+                }
+
+                return;
+            }
+
+            SKBitmap? bitmap = null;
+            SKBitmap? borderedBitmap = null;
+            try
+            {
+                bitmap = input.Bitmap?.Copy() ?? new SKBitmap(1, 1, true);
+                // bitmap = MakeTransparentBlack(bitmap);
+                borderedBitmap = PaddleOcrImagePrep.PrepareForOcr(bitmap);
+                var tempImage = Path.Combine(folder, input.Index.ToString("0000") + ".png");
+                input.FileName = tempImage;
+                batchFileNamesList.Add(input);
+
+                using var image = SKImage.FromBitmap(borderedBitmap);
+                using var data = image.Encode(SKEncodedImageFormat.Png, 90);
+                await File.WriteAllBytesAsync(tempImage, data.ToArray(), ct);
+            }
+            catch
+            {
+                // ignore
+                return;
+            }
+            finally
+            {
+                bitmap?.Dispose();
+                borderedBitmap?.Dispose();
+            }
+        });
+
+        // Add all processed items back to the original collection
+        _batchFileNames.AddRange(batchFileNamesList);
+
+        // Resolve the executable before building the command line. When the standalone
+        // binary is absent (no standalone build exists on macOS, and batch convert always
+        // requests PaddleOcrStandalone), the run falls back to the pip-installed Python
+        // CLI - and the whole I/O protocol below (result-file polling vs stdout parsing,
+        // cls model, mkldnn) must follow the binary actually launched, not the engine
+        // requested, or the fallback run exits successfully with zero parseable results.
+        // The disk-scanning resolver only runs when neither standalone binary exists.
+        string paddleOcrPath;
+        if (engineType == OcrEngineType.PaddleOcrStandalone)
+        {
+            var standaloneExe = Path.Combine(Se.PaddleOcrFolder, "paddleocr.exe");
+            var standaloneBin = Path.Combine(Se.PaddleOcrFolder, "paddleocr.bin");
+            if (File.Exists(standaloneExe))
+            {
+                paddleOcrPath = standaloneExe;
+            }
+            else if (File.Exists(standaloneBin))
+            {
+                paddleOcrPath = standaloneBin;
+            }
+            else
+            {
+                paddleOcrPath = GetPaddleOcrPytonPath();
+                engineType = OcrEngineType.PaddleOcrPython;
+            }
+        }
+        else
+        {
+            paddleOcrPath = GetPaddleOcrPytonPath();
+        }
+
+        // Subtitles are always horizontal, so the Python engine skips text-line
+        // orientation classification: it is noticeably faster and avoids loading the
+        // extra cls model. The standalone engine keeps the original behavior.
+        var useTextlineOrientation = engineType != OcrEngineType.PaddleOcrPython;
+
+        var parameters = $"ocr -i \"{folder}\" " +
+                         $"--use_textline_orientation {(useTextlineOrientation ? "true" : "false")} " +
+                         "--use_doc_orientation_classify false " +
+                         "--use_doc_unwarping false " +
+                         $"--lang {language} " +
+                         $"--text_detection_model_dir \"{_detPath + Path.DirectorySeparatorChar + detName}\" " +
+                         $"--text_detection_model_name \"{detName}\" " +
+                         $"--text_recognition_model_dir \"{_recPath + Path.DirectorySeparatorChar + recName}\" " +
+                         $"--text_recognition_model_name \"{recName}\" " +
+                         $"--textline_orientation_model_dir \"{_clsPath + Path.DirectorySeparatorChar + TextlineOrientationModelName}\" " +
+                         $"--textline_orientation_model_name \"{TextlineOrientationModelName}\"";
+
+        // Both engines report through result files rather than stdout. --save_path makes the
+        // CLI write one "<index>_res.json" per image (plus a box-annotated
+        // "<index>_ocr_res_img.png" we ignore - save_all writes every registered output and
+        // there is no json-only flag), which we poll for below.
+        //
+        // The two builds print very differently, which is why parsing stdout is not an option
+        // for one shared path: upstream PaddleOCR 3.x logs a *truncated* Python dict to stderr
+        // under the logger name "paddleocr", while the bundled standalone build restores the
+        // 2.x format - full "[[...],('text',score)]" records on stdout under "ppocr". Reading
+        // the json keeps both engines on one protocol, and gives structured polys/confidences
+        // instead of a regex over a log line.
+        var saveFolder = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(saveFolder);
+        parameters += $" --save_path \"{saveFolder}\"";
+
+        if (engineType == OcrEngineType.PaddleOcrPython)
+        {
+            // A stock pip "paddlepaddle" build can crash inside the oneDNN/PIR executor on
+            // PP-OCRv5 models (NotImplementedError: ConvertPirAttribute2RuntimeAttribute ...).
+            // The bundled standalone build is known-good and faster with MKL-DNN, so only
+            // disable it for the Python engine.
+            parameters += " --enable_mkldnn False";
+        }
+
+        var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = paddleOcrPath,
+                Arguments = parameters,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                // A GUI app launched from Finder inherits "/" as current directory; use a
+                // writable folder so relative writes from the tool cannot fail.
+                WorkingDirectory = Path.GetTempPath(),
+            },
+        };
+
+        process.StartInfo.StandardOutputEncoding = Encoding.UTF8;
+        // Without this, .NET decodes stderr with the OEM codepage on Windows, so any non-ASCII
+        // text in Paddle's (chatty) stderr turns into mojibake in logs/error messages.
+        process.StartInfo.StandardErrorEncoding = Encoding.UTF8;
+        process.StartInfo.RedirectStandardOutput = true;
+        process.StartInfo.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+        process.StartInfo.EnvironmentVariables["PYTHONUTF8"] = "1";
+        // We always pass explicit local model dirs, so skip PaddleX's online model-source
+        // connectivity check - otherwise it can hang the OCR run at "Initializing...".
+        process.StartInfo.EnvironmentVariables["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True";
+        process.ErrorDataReceived += ErrorHandler;
+        lock (_errorLock)
+        {
+            _errorOutput.Clear();
+        }
+
+        Se.WriteToolsLog($"Paddle OCR ({engineType}) starting - Cmd: \"{paddleOcrPath}\" {parameters}");
+
+        _batchStopwatch.Restart();
+
+#pragma warning disable CA1416 // Validate platform compatibility
+        process.Start();
+#pragma warning restore CA1416 // Validate platform compatibility;
+
+        // Both streams have to be drained continuously even though we parse neither: PaddleOCR
+        // is very chatty on stderr (and the standalone build logs every result to stdout), so
+        // letting an OS pipe fill up blocks the process mid-run.
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+
+        // PaddleOCR writes one "<index>_res.json" per image as it goes, so poll the folder and
+        // report each result as soon as it appears - that gives progress for every line instead
+        // of a single update at the very end.
+        //
+        // Important: the pip "paddleocr" launcher spawns a separate worker process to do the
+        // actual OCR and can exit (or block) long before that worker finishes. So we poll
+        // until results stop arriving, NOT until the launcher exits - otherwise only the
+        // first couple of lines get reported while the worker keeps running in the background.
+        var poller = CreatePoller(saveFolder);
+        await poller.PollUntilDoneAsync(() => process.HasExited, ReportResult, LogParseError, cancellationToken);
+
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            // User cancelled - make sure the launcher and its worker process are stopped.
+            KillProcessTree(process);
+            throw;
+        }
+
+        // Process has exited; block briefly so the async stderr handler flushes the tail.
+        try
+        {
+            process.WaitForExit(3000);
+        }
+        catch
+        {
+            // ignore
+        }
+
+        // Final sweep - report any files written after the last poll. Done before the failure
+        // check below so a run that produced results but exited non-zero still delivers them.
+        poller.ReportNew(ReportResult, LogParseError);
+
+        try
+        {
+            Directory.Delete(folder, true);
+        }
+        catch
+        {
+            // ignore
+        }
+
+        try
+        {
+            Directory.Delete(saveFolder, true);
+        }
+        catch
+        {
+            // ignore
+        }
+
+        // Not a single result file. Either the run failed outright (non-zero exit, stderr
+        // carries the reason) or it "succeeded" without writing anything - a rejected
+        // --save_path, a worker killed mid-run. Both have to surface as an error: the callers
+        // only show one when Error is set, so staying quiet here hands the user an empty
+        // subtitle that looks like a successful OCR.
+        if (poller.ReportedCount == 0 && _batchFileNames.Count > 0)
+        {
+            lock (_errorLock)
+            {
+                Error = _errorOutput.Length > 0
+                    ? _errorOutput.ToString()
+                    : $"PaddleOCR wrote no results and exited with code {process.ExitCode}.";
+            }
+
+            Se.LogError($"PaddleOCR failed with exit code {process.ExitCode} and error: {Error}");
+            Se.WriteToolsLog($"Paddle OCR ({engineType}) failed with exit code {process.ExitCode}: {Error}");
+        }
+    }
+
+    // Test seam: wires up the batch inputs and progress sink used by
+    // the shared result poller, so the polling/reporting logic can be tested.
+    internal void InitializeForTest(List<PaddleOcrBatchInput> inputs, IProgress<PaddleOcrBatchProgress> progress)
+    {
+        _batchFileNames = inputs;
+        _batchProgress = progress;
+    }
+
+    /// <summary>
+    /// Builds the poller over the batch's inputs. Results come back by position in this list,
+    /// which is the batch sorted by line index, so a result maps straight to its input.
+    /// </summary>
+    internal PaddleOcrResultPoller CreatePoller(string saveFolder)
+    {
+        _pollOrder = _batchFileNames.OrderBy(p => p.Index).ToList();
+        var stems = _pollOrder.Select(p => Path.GetFileNameWithoutExtension(p.FileName)).ToList();
+        return new PaddleOcrResultPoller(saveFolder, stems);
+    }
+
+    private List<PaddleOcrBatchInput> _pollOrder = new();
+
+    internal void ReportResult(int position, List<PaddleOcrTextRegion> regions)
+    {
+        var input = _pollOrder[position];
+        Se.WriteToolsLog(
+            $"Paddle OCR result (line index {input.Index}) ready at {_batchStopwatch.Elapsed.TotalSeconds:F1}s");
+
+        var confidence = 0.0;
+        var text = regions.Count > 0
+            ? PaddleOcrTextLayout.BuildText(regions, MinConfidencePercent, _batchRightToLeft, out confidence)
+            : string.Empty;
+
+        _batchProgress?.Report(new PaddleOcrBatchProgress
+        {
+            Index = input.Index,
+            Item = input.Item,
+            Text = text,
+            Confidence = confidence,
+        });
+    }
+
+    private static void LogParseError(string stem, string message)
+    {
+        Se.LogError($"Failed to parse PaddleOCR result JSON for {stem}: {message}");
+    }
+
+    private void ErrorHandler(object sendingProcess, DataReceivedEventArgs outLine)
+    {
+        if (outLine.Data == null)
+        {
+            return;
+        }
+
+        lock (_errorLock)
+        {
+            // Cap the captured stderr so a long, chatty run doesn't grow unbounded.
+            if (_errorOutput.Length < 100_000)
+            {
+                _errorOutput.AppendLine(outLine.Data);
+            }
+        }
+    }
+
+    private static void KillProcessTree(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch
+        {
+            // ignore - best effort
+        }
+    }
+
+    private static string GetPaddleOcrPytonPath()
+    {
+        var possiblePaths = new[]
+        {
+            // Windows user install
+//            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Programs\Python"),
+
+            // Windows pip scripts dir (per environment)
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                @"AppData\Local\Programs\Python"),
+
+            // Mac default Frameworks path
+            "/Library/Frameworks/Python.framework/Versions",
+
+            // Mac Homebrew path
+            "/usr/local/Cellar/python",
+            "/opt/homebrew/Cellar/python",
+
+            // Conda default paths
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "opt", "anaconda3"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "miniconda3")
+        };
+
+        string executableName;
+        if (Environment.OSVersion.Platform == PlatformID.Win32NT)
+        {
+            executableName = "paddleocr.exe";
+        }
+        else
+        {
+            executableName = "paddleocr"; // Mac/Linux - no .exe
+        }
+
+        var foundFiles = possiblePaths
+            .Where(Directory.Exists)
+            .SelectMany(baseDir => SafeGetFiles(baseDir, executableName))
+            .Concat(GetCliShimCandidates(executableName))
+            .Distinct()
+            .ToList();
+
+        if (foundFiles.Count == 0)
+        {
+            return "paddleocr"; // Fallback to just the command name
+        }
+
+        // Several Python installs may each have a "paddleocr" launcher, but only the
+        // ones whose environment also has the "paddle" backend (and a usable interpreter)
+        // can actually run. Picking the wrong one fails with:
+        //   ModuleNotFoundError: No module named 'paddle'
+        var usable = foundFiles
+            .Where(p => HasPythonInterpreter(p) && HasPaddleBackend(p))
+            .ToList();
+        if (usable.Count > 0)
+        {
+            foundFiles = usable;
+        }
+
+        var sitePackages = foundFiles
+            .Where(p => p.Contains("site-packages"))
+            .OrderByDescending(p => p.Length)
+            .ToList();
+        if (sitePackages.Any())
+        {
+            return sitePackages.Last();
+        }
+
+        return foundFiles.Last();
+    }
+
+    // A conda/Python tree can contain unreadable directories or reparse-point cycles;
+    // a resolver failure must degrade to "not found here", never abort the OCR run.
+    private static string[] SafeGetFiles(string baseDir, string fileName)
+    {
+        try
+        {
+            return Directory.GetFiles(baseDir, fileName, SearchOption.AllDirectories);
+        }
+        catch
+        {
+            return Array.Empty<string>();
+        }
+    }
+
+    // A GUI app launched from Finder/launchd does not inherit the shell PATH, so
+    // Process.Start("paddleocr") cannot find pip/Homebrew installs even though the
+    // command works fine in a terminal (#12953). Probe the standard CLI-shim
+    // directories directly, plus whatever PATH the process does have.
+    private static IEnumerable<string> GetCliShimCandidates(string executableName)
+    {
+        var candidates = new List<string>();
+
+        if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+        {
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            candidates.Add(Path.Combine(home, ".local", "bin", executableName)); // pip install --user / pipx
+            candidates.Add("/usr/local/bin/" + executableName); // Homebrew (Intel) / system pip
+            candidates.Add("/opt/homebrew/bin/" + executableName); // Homebrew (Apple Silicon)
+            candidates.Add("/usr/bin/" + executableName); // system package manager
+            candidates.Add("/opt/local/bin/" + executableName); // MacPorts
+
+            // macOS "pip install --user": ~/Library/Python/X.Y/bin/paddleocr
+            var macUserPython = Path.Combine(home, "Library", "Python");
+            if (Directory.Exists(macUserPython))
+            {
+                try
+                {
+                    candidates.AddRange(Directory.GetFiles(macUserPython, executableName, SearchOption.AllDirectories));
+                }
+                catch
+                {
+                    // ignore access errors
+                }
+            }
+        }
+
+        var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+        foreach (var dir in pathEnv.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            try
+            {
+                candidates.Add(Path.Combine(dir.Trim(), executableName));
+            }
+            catch
+            {
+                // ignore malformed PATH entries
+            }
+        }
+
+        return candidates.Where(File.Exists);
+    }
+
+    // Resolves the Python environment root for a "paddleocr" launcher:
+    //   <root>\Scripts\paddleocr.exe  (Windows)  ->  <root>
+    //   <root>/bin/paddleocr          (Mac/Linux) ->  <root>
+    private static string? GetPythonEnvRoot(string paddleOcrExecutablePath)
+    {
+        var binDir = Path.GetDirectoryName(paddleOcrExecutablePath);
+        return binDir == null ? null : Directory.GetParent(binDir)?.FullName;
+    }
+
+    private static bool HasPaddleBackend(string paddleOcrExecutablePath)
+    {
+        try
+        {
+            var root = GetPythonEnvRoot(paddleOcrExecutablePath);
+            if (root == null || !Directory.Exists(root))
+            {
+                return false;
+            }
+
+            // Windows: <root>\Lib\site-packages\paddle
+            if (Directory.Exists(Path.Combine(root, "Lib", "site-packages", "paddle")))
+            {
+                return true;
+            }
+
+            // Mac/Linux: <root>/lib/pythonX.Y/site-packages/paddle
+            var unixLib = Path.Combine(root, "lib");
+            if (Directory.Exists(unixLib))
+            {
+                foreach (var pyDir in Directory.EnumerateDirectories(unixLib, "python*"))
+                {
+                    if (Directory.Exists(Path.Combine(pyDir, "site-packages", "paddle")))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // ignore - treat as "no paddle backend found"
+        }
+
+        return false;
+    }
+
+    private static bool HasPythonInterpreter(string paddleOcrExecutablePath)
+    {
+        try
+        {
+            var binDir = Path.GetDirectoryName(paddleOcrExecutablePath);
+            var root = GetPythonEnvRoot(paddleOcrExecutablePath);
+            if (binDir == null || root == null)
+            {
+                return false;
+            }
+
+            var names = Environment.OSVersion.Platform == PlatformID.Win32NT
+                ? new[] { "python.exe" }
+                : new[] { "python3", "python" };
+
+            foreach (var name in names)
+            {
+                if (File.Exists(Path.Combine(root, name)) || File.Exists(Path.Combine(binDir, name)))
+                {
+                    return true;
+                }
+            }
+        }
+        catch
+        {
+            // ignore - treat as "no interpreter found"
+        }
+
+        return false;
+    }
+
+    public static SKBitmap AddBorder(SKBitmap originalBitmap, int borderWidth, SKColor color)
+    {
+        // Calculate new dimensions
+        int newWidth = originalBitmap.Width + 2 * borderWidth;
+        int newHeight = originalBitmap.Height + 2 * borderWidth;
+
+        // Create a new bitmap with the new dimensions
+        SKBitmap borderedBitmap = new(newWidth, newHeight);
+
+        // Create a canvas to draw on the new bitmap
+        using (var canvas = new SKCanvas(borderedBitmap))
+        {
+            // Fill the canvas with a border color (optional)
+            var borderColor = color;
+            canvas.Clear(borderColor);
+
+            // Draw the original bitmap onto the canvas, offset by the border width
+            canvas.DrawBitmap(originalBitmap, borderWidth, borderWidth);
+        }
+
+        return borderedBitmap;
+    }
+
+    // Every language PaddleOCR 3.7 supports with a recognition model that ships in the
+    // bundled support files. Adding a code here is enough to offer it - as long as the
+    // code is also listed in the matching script group above, so GetRecName picks the
+    // right model (PaddleOcrLanguageMappingTests guards that).
+    public static List<OcrLanguage2> GetLanguages()
+    {
+        return new List<OcrLanguage2>
+        {
+            new("abq", "Abaza"),
+            new("ady", "Adyghe"),
+            new("af", "Afrikaans"),
+            new("sq", "Albanian"),
+            new("ang", "Angika"),
+            new("ar", "Arabic"),
+            new("ava", "Avar"),
+            new("az", "Azerbaijani"),
+            new("bal", "Balochi"),
+            new("ba", "Bashkir"),
+            new("eu", "Basque"),
+            new("be", "Belarusian"),
+            new("bho", "Bhojpuri"),
+            new("bh", "Bihari"),
+            new("bs", "Bosnian"),
+            new("bg", "Bulgarian"),
+            new("bua", "Buriat"),
+            new("ca", "Catalan"),
+            new("che", "Chechen"),
+            new("ch", "Chinese and English"),
+            new("chinese_cht", "Chinese traditional"),
+            new("cv", "Chuvash"),
+            new("hr", "Croatian"),
+            new("cs", "Czech"),
+            new("da", "Danish"),
+            new("dar", "Dargwa"),
+            new("nl", "Dutch"),
+            new("en", "English"),
+            new("et", "Estonian"),
+            new("fi", "Finnish"),
+            new("fr", "French"),
+            new("gl", "Galician"),
+            new("ka", "Georgian"),
+            new("de", "German"),
+            new("el", "Greek"),
+            new("bgc", "Haryanvi"),
+            new("hi", "Hindi"),
+            new("hu", "Hungarian"),
+            new("is", "Icelandic"),
+            new("id", "Indonesian"),
+            new("inh", "Ingush"),
+            new("ga", "Irish"),
+            new("it", "Italian"),
+            new("japan", "Japanese"),
+            new("kbd", "Kabardian"),
+            new("xal", "Kalmyk"),
+            new("kaa", "Karakalpak"),
+            new("kk", "Kazakh"),
+            new("kv", "Komi"),
+            new("gom", "Konkani"),
+            new("korean", "Korean"),
+            new("ku", "Kurdish"),
+            new("ky", "Kyrgyz"),
+            new("lbe", "Lak"),
+            new("la", "Latin"),
+            new("lv", "Latvian"),
+            new("lez", "Lezghian"),
+            new("lt", "Lithuanian"),
+            new("lb", "Luxembourgish"),
+            new("mk", "Macedonian"),
+            new("mah", "Magahi"),
+            new("mai", "Maithili"),
+            new("ms", "Malay"),
+            new("mt", "Maltese"),
+            new("mi", "Maori"),
+            new("mhr", "Mari"),
+            new("mr", "Marathi"),
+            new("mo", "Moldovan"),
+            new("mn", "Mongolian"),
+            new("sck", "Nagpur"),
+            new("ne", "Nepali"),
+            new("new", "Newari"),
+            new("no", "Norwegian"),
+            new("oc", "Occitan"),
+            new("os", "Ossetian"),
+            new("pi", "Pali"),
+            new("ps", "Pashto"),
+            new("fa", "Persian"),
+            new("pl", "Polish"),
+            new("pt", "Portuguese"),
+            new("qu", "Quechua"),
+            new("ro", "Romanian"),
+            new("rm", "Romansh"),
+            new("ru", "Russian"),
+            new("sah", "Sakha"),
+            new("sa", "Sanskrit"),
+            new("rs_cyrillic", "Serbian (cyrillic)"),
+            new("rs_latin", "Serbian (latin)"),
+            new("sd", "Sindhi"),
+            new("sk", "Slovak"),
+            new("sl", "Slovenian"),
+            new("es", "Spanish"),
+            new("sw", "Swahili"),
+            new("sv", "Swedish"),
+            new("tab", "Tabassaran"),
+            new("tl", "Tagalog"),
+            new("tg", "Tajik"),
+            new("ta", "Tamil"),
+            new("tt", "Tatar"),
+            new("te", "Telugu"),
+            new("th", "Thai"),
+            new("tr", "Turkish"),
+            new("tyv", "Tuvinian"),
+            new("udm", "Udmurt"),
+            new("uk", "Ukrainian"),
+            new("ur", "Urdu"),
+            new("ug", "Uyghur"),
+            new("uz", "Uzbek"),
+            new("vi", "Vietnamese"),
+            new("cy", "Welsh"),
+        }.OrderBy(p => p.Name).ToList();
+    }
+
+    /// <summary>
+    /// Maps the legacy language codes the dropdown used to offer onto the ISO codes it
+    /// offers now, so an already saved setting still selects the same language. PaddleOCR
+    /// accepts both spellings, so only the stored value needs translating.
+    /// </summary>
+    public static string NormalizeLanguageCode(string? code) => code switch
+    {
+        "german" => "de",
+        "french" => "fr",
+        null => string.Empty,
+        _ => code,
+    };
+}

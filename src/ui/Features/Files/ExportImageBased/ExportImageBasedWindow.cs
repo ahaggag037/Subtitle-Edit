@@ -1,0 +1,644 @@
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
+using Avalonia.Controls.Templates;
+using Avalonia.Data;
+using Avalonia.Layout;
+using Avalonia.Media;
+using Avalonia.Styling;
+using Nikse.SubtitleEdit.Features.Main;
+using Nikse.SubtitleEdit.Logic;
+using Nikse.SubtitleEdit.Logic.Config;
+using Nikse.SubtitleEdit.Logic.ValueConverters;
+
+namespace Nikse.SubtitleEdit.Features.Files.ExportImageBased;
+
+public class ExportImageBasedWindow : Window
+{
+    public ExportImageBasedWindow(ExportImageBasedViewModel vm)
+    {
+        UiUtil.InitializeWindow(this, GetType().Name);
+        Bind(TitleProperty, new Binding(nameof(vm.Title)));
+        CanResize = true;
+        Width = 1000;
+        Height = 800;
+        MinWidth = 900;
+        MinHeight = 700;
+        vm.Window = this;
+        DataContext = vm;
+
+        var grid = new Grid
+        {
+            RowDefinitions =
+            {
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Star) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+            },
+            ColumnDefinitions =
+            {
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) },
+            },
+            Margin = UiUtil.MakeWindowMargin(),
+            ColumnSpacing = 10,
+            RowSpacing = 10,
+            Width = double.NaN,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+
+        var subtitlesView = MakeSubtitlesView(vm);
+        var controlsView = MakeControlsView(vm);
+        var previewView = MakePreviewView(vm);
+        var progressView = MakeProgressView(vm);
+
+        var buttonExport = UiUtil.MakeButton(Se.Language.General.ExportDotDotDot, vm.ExportCommand)
+            .WithBindIsVisible(vm, nameof(vm.IsExportButtonVisible));
+        buttonExport.IsDefault = true; // the dialog's accept button - Enter runs it (#14586)
+        var buttonCancel = UiUtil.MakeButtonCancel(vm.CancelCommand).WithBindIsVisible(nameof(vm.IsGenerating));
+        var buttonDone = UiUtil.MakeButtonDone(vm.CancelCommand).WithBindIsVisible(nameof(vm.IsGenerating), InverseBooleanConverter.Instance);
+        var panelButtons = UiUtil.MakeButtonBar(buttonExport, buttonDone, buttonCancel);
+        
+        var comboProfile = UiUtil.MakeComboBox(vm.Profiles, vm, nameof(vm.SelectedProfile));
+        comboProfile.SelectionChanged += vm.ProfileChanged;
+        var labelProfile = UiUtil.MakeLabel(Se.Language.General.Profile);
+        comboProfile.WithLabeledBy(labelProfile);
+        var buttonProfileBrowse = UiUtil.MakeButtonBrowse(vm.ShowProfileCommand, accessibleName: Se.Language.General.Profile).WithMarginLeft(5);
+        var panelProfile = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Children =
+            {
+                labelProfile,
+                comboProfile,
+                buttonProfileBrowse,
+            }
+        };
+        
+        var gridButtons = new Grid
+        {
+            RowDefinitions =
+            {
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+            },
+            ColumnDefinitions =
+            {
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) },
+            },
+            Width = double.NaN,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+        gridButtons.Add(panelProfile, 0);
+        gridButtons.Add(panelButtons, 0, 1);
+
+        grid.Add(subtitlesView, 0);
+        grid.Add(controlsView, 1);
+        grid.Add(previewView, 2);
+        grid.Add(progressView, 3);
+        grid.Add(gridButtons, 4);
+
+        Content = grid;
+
+        UiUtil.FocusOnFirstActivation(this, () => { TableViewExtras.FocusRow(vm.SubtitleGrid); }); // initial focus on an input, not an action button - a focused button clicks on bare Space
+        KeyDown += (_, e) => vm.OnKeyDown(e);
+        KeyUp += (_, e) => vm.OnKeyUp(e);
+        Loaded += (_, e) => vm.OnLoaded();
+        Closing += (_, e) => vm.OnClosing();
+
+        Closing += delegate { UiUtil.SaveWindowPosition(this); };
+        Loaded += delegate { UiUtil.RestoreWindowPosition(this); };
+    }
+
+    private Border MakeSubtitlesView(ExportImageBasedViewModel vm)
+    {
+        vm.SubtitleGrid = TableViewExtras.MakeTableView().WithAccessibleName(Se.Language.General.Lines); // #12087
+        vm.SubtitleGrid.Height = double.NaN; // auto size inside scroll viewer
+        vm.SubtitleGrid.Margin = new Thickness(2);
+        vm.SubtitleGrid.ItemsSource = vm.Subtitles;
+        vm.SubtitleGrid.DataContext = vm.Subtitles;
+
+        //   vm.SubtitleGrid.DoubleTapped += vm.OnSubtitleGridDoubleTapped;
+
+        var fullTimeConverter = new TimeSpanToDisplayFullConverter();
+        var shortTimeConverter = new TimeSpanToDisplayShortConverter();
+        var textToFlowDirectionConverter = new TextToFlowDirectionConverter();
+
+        // Columns
+        vm.SubtitleGrid.Columns.Add(new SeTableViewColumn
+        {
+            Header = Se.Language.General.NumberSymbol,
+            Binding = new Binding(nameof(SubtitleLineViewModel.Number)),
+            Width = new GridLength(50),
+            CellTheme = UiUtil.TableViewCellTheme,
+            HeaderTheme = UiUtil.TableViewColumnHeaderTheme,
+        });
+        vm.SubtitleGrid.Columns.Add(new SeTableViewColumn
+        {
+            Header = Se.Language.General.Show,
+            Binding = new Binding(nameof(SubtitleLineViewModel.StartTime)) { Converter = fullTimeConverter },
+            Width = new GridLength(120),
+            CellTheme = UiUtil.TableViewCellTheme,
+            HeaderTheme = UiUtil.TableViewColumnHeaderTheme,
+        });
+        vm.SubtitleGrid.Columns.Add(new SeTableViewColumn
+        {
+            Header = Se.Language.General.Hide,
+            Binding = new Binding(nameof(SubtitleLineViewModel.EndTime)) { Converter = fullTimeConverter },
+            Width = new GridLength(120),
+            CellTheme = UiUtil.TableViewCellTheme,
+            HeaderTheme = UiUtil.TableViewColumnHeaderTheme,
+        });
+
+        // The DataGrid sized this column to content (Auto); TableView treats Auto as
+        // star, so use a fixed width that fits the short duration format.
+        vm.SubtitleGrid.Columns.Add(new SeTableViewColumn
+        {
+            Header = Se.Language.General.Duration,
+            Width = new GridLength(90),
+            CellTheme = UiUtil.TableViewNoPaddingCellTheme,
+            HeaderTheme = UiUtil.TableViewColumnHeaderTheme,
+            NameBinding = new Binding(nameof(SubtitleLineViewModel.Duration)) { Converter = shortTimeConverter },
+            CellTemplate = new FuncDataTemplate<SubtitleLineViewModel>((value, nameScope) =>
+            {
+                var border = new Border
+                {
+                    Padding = new Thickness(4, 2),
+                    [!Border.BackgroundProperty] = new Binding(nameof(SubtitleLineViewModel.DurationBackgroundBrush))
+                };
+
+                var textBlock = new TextBlock
+                {
+                    VerticalAlignment = VerticalAlignment.Center,
+                    TextWrapping = TextWrapping.Wrap,
+                    [!TextBlock.TextProperty] = new Binding(nameof(SubtitleLineViewModel.Duration)) { Converter = shortTimeConverter },
+                };
+
+                border.Child = textBlock;
+                return border;
+            })
+        });
+
+        vm.SubtitleGrid.Columns.Add(new SeTableViewColumn
+        {
+            Header = Se.Language.General.Text,
+            Width = new GridLength(1, GridUnitType.Star),
+            CellTheme = UiUtil.TableViewNoPaddingCellTheme,
+            HeaderTheme = UiUtil.TableViewColumnHeaderTheme,
+            NameBinding = new Binding(nameof(SubtitleLineViewModel.Text)),
+            CellTemplate = new FuncDataTemplate<SubtitleLineViewModel>((value, nameScope) =>
+            {
+                var border = new Border
+                {
+                    Padding = new Thickness(4, 2),
+                    [!Border.BackgroundProperty] = new Binding(nameof(SubtitleLineViewModel.TextBackgroundBrush))
+                };
+
+                var textBlock = new TextBlock
+                {
+                    VerticalAlignment = VerticalAlignment.Center,
+                    TextWrapping = TextWrapping.Wrap,
+                    [!TextBlock.TextProperty] = new Binding(nameof(SubtitleLineViewModel.Text)),
+
+                    // Right-to-left text needs a right-to-left cell, or Avalonia splits the
+                    // line at every zero width non-joiner and reverses the word order (#13160).
+                    [!TextBlock.FlowDirectionProperty] = new Binding(nameof(SubtitleLineViewModel.Text)) { Converter = textToFlowDirectionConverter },
+                };
+
+                border.Child = textBlock;
+                return border;
+            })
+        });
+
+        vm.SubtitleGrid.DataContext = vm.Subtitles;
+        vm.SubtitleGrid.Bind(TableView.SelectedItemProperty, new Binding(nameof(vm.SelectedSubtitle))
+        {
+            Source = vm,
+            Mode = BindingMode.TwoWay
+        });
+        vm.SubtitleGrid.SelectionChanged += vm.SubtitleGrid_SelectionChanged;
+
+
+
+        var flyout = new MenuFlyout();
+
+        //flyout.Opening += vm.SubtitleContextOpening;
+
+        var deleteMenuItem = new MenuItem { Header = Se.Language.General.Delete };
+        deleteMenuItem.Command = vm.DeleteSelectedLinesCommand;
+        flyout.Items.Add(deleteMenuItem);
+
+        flyout.Items.Add(new Separator());
+
+        var italicMenuItem = new MenuItem { Header = Se.Language.General.Italic };
+        italicMenuItem.Command = vm.ToggleLinesItalicCommand;
+        flyout.Items.Add(italicMenuItem);
+
+        var boldMenuItem = new MenuItem { Header = Se.Language.General.Bold };
+        boldMenuItem.Command = vm.ToggleLinesBoldCommand;
+        flyout.Items.Add(boldMenuItem);
+
+        // Set the ContextFlyout property
+        vm.SubtitleGrid.ContextFlyout = flyout;
+        UiUtil.AttachMacContextFlyoutHandler(vm.SubtitleGrid);
+        //vm.SubtitleGrid.AddHandler(InputElement.PointerPressedEvent, vm.SubtitleGrid_PointerPressed,
+        //    RoutingStrategies.Tunnel);
+        //vm.SubtitleGrid.AddHandler(InputElement.PointerReleasedEvent, vm.SubtitleGrid_PointerReleased,
+        //    RoutingStrategies.Tunnel);
+
+
+        return UiUtil.MakeBorderForControl(vm.SubtitleGrid);
+    }
+
+    private Border MakeControlsView(ExportImageBasedViewModel vm)
+    {
+        var grid = new Grid
+        {
+            RowDefinitions =
+            {
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+            },
+            ColumnDefinitions =
+            {
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+            },
+            ColumnSpacing = 5,
+            RowSpacing = 5,
+            Width = double.NaN,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+
+
+        // column 1
+        var labelFontFamily = UiUtil.MakeLabel(Se.Language.General.FontName);
+        var comboBoxFontFamily = UiUtil.MakeComboBox(vm.FontFamilies, vm, nameof(vm.SelectedFontFamily));
+        comboBoxFontFamily.SelectionChanged += vm.ComboChanged;
+
+        var labelFontSize = UiUtil.MakeLabel(Se.Language.General.FontSize);
+        var comboBoxFontSize = UiUtil.MakeComboBox(vm.FontSizes, vm, nameof(vm.SelectedFontSize));
+        comboBoxFontSize.SelectionChanged += vm.ComboChanged;
+        var panelFontSizeAndBold = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 5,
+            Children =
+            {
+                comboBoxFontSize,
+            }
+        };
+
+        var labelResolution = UiUtil.MakeLabel(Se.Language.General.Resolution);
+        var comboBoxResolution = UiUtil.MakeComboBox(vm.Resolutions, vm, nameof(vm.SelectedResolution));
+        comboBoxResolution.SelectionChanged += vm.ComboResolutionChanged;
+
+        var labelLeftRightMargin = UiUtil.MakeLabel(Se.Language.File.Export.LeftRightMargin);
+        var comboBoxLeftRightMargin = UiUtil.MakeComboBox(vm.LeftRightMargins, vm, nameof(vm.SelectedLeftRightMargin));
+        comboBoxLeftRightMargin.SelectionChanged += vm.ComboChanged;
+
+        var labelTopBottomMargin = UiUtil.MakeLabel(Se.Language.File.Export.TopBottomMargin);
+        var comboBoxTopBottomMargin = UiUtil.MakeComboBox(vm.TopBottomMargins, vm, nameof(vm.SelectedTopBottomMargin));
+        comboBoxTopBottomMargin.SelectionChanged += vm.ComboChanged;
+
+        var labelAlignment = UiUtil.MakeLabel(Se.Language.General.Alignment);
+        var comboBoxAlignment = UiUtil.MakeComboBox(vm.Alignments, vm, nameof(vm.SelectedAlignment));
+        comboBoxAlignment.SelectionChanged += vm.ComboChanged;
+
+        var labelContentAlignment = UiUtil.MakeLabel(Se.Language.General.ContentAlignment);
+        var comboBoxContentAlignment = UiUtil.MakeComboBox(vm.ContentAlignments, vm, nameof(vm.SelectedContentAlignment));
+        comboBoxContentAlignment.SelectionChanged += vm.ComboChanged;
+
+        grid.Add(labelFontFamily, 0);
+        grid.Add(comboBoxFontFamily, 0, 1);
+
+        grid.Add(labelFontSize, 1, 0);
+        grid.Add(panelFontSizeAndBold, 1, 1);
+
+        grid.Add(labelResolution, 2, 0);
+        grid.Add(comboBoxResolution, 2, 1);
+
+        grid.Add(labelLeftRightMargin, 3, 0);
+        grid.Add(comboBoxLeftRightMargin, 3, 1);
+
+        grid.Add(labelTopBottomMargin, 4, 0);
+        grid.Add(comboBoxTopBottomMargin, 4, 1);
+
+        grid.Add(labelAlignment, 5, 0);
+        grid.Add(comboBoxAlignment, 5, 1);
+
+        grid.Add(labelContentAlignment, 6, 0);
+        grid.Add(comboBoxContentAlignment, 6, 1);
+
+        // column 2
+        var labelFontColor = UiUtil.MakeLabel(Se.Language.General.FontColor);
+        var colorPickerFontColor = UiUtil.MakeColorPickerButton(vm, nameof(vm.FontColor), true);
+        grid.Add(labelFontColor, 0, 2);
+        grid.Add(colorPickerFontColor, 0, 3);
+
+        var labelOutlineColor = UiUtil.MakeLabel(string.Empty).WithBindText(vm, nameof(vm.OutlineColorText));
+        var colorPickerOutlineColor = UiUtil.MakeColorPickerButton(vm, nameof(vm.OutlineColor), true);
+        grid.Add(labelOutlineColor, 1, 2);
+        grid.Add(colorPickerOutlineColor, 1, 3);
+
+        var labelShadowColor = UiUtil.MakeLabel(string.Empty).WithBindText(vm, nameof(vm.ShadowColorText));
+        var colorPickerShadowColor = UiUtil.MakeColorPickerButton(vm, nameof(vm.ShadowColor), true);
+        grid.Add(labelShadowColor, 2, 2);
+        grid.Add(colorPickerShadowColor, 2, 3);
+
+        var labelBaclgroundColor = UiUtil.MakeLabel(string.Empty).WithBindText(vm, nameof(vm.BoxColorText));
+        var colorPickerBackgroundColor = UiUtil.MakeColorPickerButton(vm, nameof(vm.BoxColor), true);
+        grid.Add(labelBaclgroundColor, 3, 2);
+        grid.Add(colorPickerBackgroundColor, 3, 3);
+
+        var labelLineHeight = UiUtil.MakeLabel(Se.Language.File.Export.LineSpacingPercent);
+        var comboBoxLineHeight = UiUtil.MakeComboBox(vm.LineSpacings, vm, nameof(vm.SelectedLineSpacing));
+        comboBoxLineHeight.SelectionChanged += vm.ComboChanged;
+        grid.Add(labelLineHeight, 4, 2);
+        grid.Add(comboBoxLineHeight, 4, 3);
+
+        var labelPaddingLeftRight = UiUtil.MakeLabel(Se.Language.File.Export.PaddingLeftRight);
+        var comboBoxPaddingLeftRight = UiUtil.MakeComboBox(vm.PaddingsLeftRight, vm, nameof(vm.SelectedPaddingLeftRight));
+        comboBoxPaddingLeftRight.SelectionChanged += vm.ComboChanged;
+        grid.Add(labelPaddingLeftRight, 5, 2);
+        grid.Add(comboBoxPaddingLeftRight, 5, 3);
+
+        var labelPaddingTopBottom = UiUtil.MakeLabel(Se.Language.File.Export.PaddingTopBottom);
+        var comboBoxPaddingTopBottom = UiUtil.MakeComboBox(vm.PaddingsTopBottom, vm, nameof(vm.SelectedPaddingTopBottom));
+        comboBoxPaddingTopBottom.SelectionChanged += vm.ComboChanged;
+        grid.Add(labelPaddingTopBottom, 6, 2);
+        grid.Add(comboBoxPaddingTopBottom, 6, 3);
+
+
+        // column 3
+        var checkBoxBold = UiUtil.MakeCheckBox(Se.Language.General.Bold, vm, nameof(vm.IsBold));
+        checkBoxBold.IsCheckedChanged += vm.CheckBoxChanged;
+        var checkBoxRightToLeft = UiUtil.MakeCheckBox(Se.Language.General.RightToLeft, vm, nameof(vm.IsRightToLeft));
+        checkBoxRightToLeft.IsCheckedChanged += vm.CheckBoxChanged;
+        var checkBoxTextEffect = UiUtil.MakeCheckBox(Se.Language.File.Export.TextEffect, vm, nameof(vm.IsTextEffectEnabled));
+        checkBoxTextEffect.IsCheckedChanged += vm.CheckBoxChanged;
+        var buttonTextEffectSettings = UiUtil.MakeButton(vm.ShowTextEffectSettingsCommand, IconNames.Settings,
+            Se.Language.File.Export.TextEffectSettingsTitle);
+        var panelBoldAndRightToLeft = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 10,
+            VerticalAlignment = VerticalAlignment.Center,
+            Children = { checkBoxBold, checkBoxRightToLeft, checkBoxTextEffect, buttonTextEffectSettings }
+        };
+        grid.Add(panelBoldAndRightToLeft, 0, 5, 1, 3);
+
+
+        var labelOutlineWidth = UiUtil.MakeLabel(Se.Language.General.OutlineWidth);
+        var comboBoxOutlineWidth = UiUtil.MakeComboBox(vm.OutlineWidths, vm, nameof(vm.SelectedOutlineWidth));
+        comboBoxOutlineWidth.SelectionChanged += vm.ComboChanged;
+        grid.Add(labelOutlineWidth, 1, 4);
+        grid.Add(comboBoxOutlineWidth, 1, 5);
+
+        var labelShadowWidth = UiUtil.MakeLabel(Se.Language.General.ShadowWidth);
+        var comboBoxShadowWidth = UiUtil.MakeComboBox(vm.ShadowWidths, vm, nameof(vm.SelectedShadowWidth));
+        comboBoxShadowWidth.SelectionChanged += vm.ComboChanged;
+        grid.Add(labelShadowWidth, 2, 4);
+        grid.Add(comboBoxShadowWidth, 2, 5);
+
+        var labelBoxCornerRadius = UiUtil.MakeLabel(Se.Language.General.BoxCornerRadius);
+        var comboBoxBoxCornerRadius = UiUtil.MakeComboBox(vm.BoxCornerRadiusList, vm, nameof(vm.SelectedBoxCornerRadius));
+        comboBoxBoxCornerRadius.SelectionChanged += vm.ComboChanged;
+        grid.Add(labelBoxCornerRadius, 3, 4);
+        grid.Add(comboBoxBoxCornerRadius, 3, 5);
+
+        var comboPadLeft = UiUtil.MakeComboBox(vm.BoxPaddingValues, vm, nameof(vm.BoxPaddingLeft));
+        ToolTip.SetTip(comboPadLeft, Se.Language.General.Left);
+        comboPadLeft.WithAccessibleName(Se.Language.General.Left); // the four box paddings only have tooltips (#12087)
+        comboPadLeft.SelectionChanged += vm.ComboChanged;
+        var comboPadRight = UiUtil.MakeComboBox(vm.BoxPaddingValues, vm, nameof(vm.BoxPaddingRight));
+        ToolTip.SetTip(comboPadRight, Se.Language.General.Right);
+        comboPadRight.WithAccessibleName(Se.Language.General.Right);
+        comboPadRight.SelectionChanged += vm.ComboChanged;
+        var comboPadTop = UiUtil.MakeComboBox(vm.BoxPaddingValues, vm, nameof(vm.BoxPaddingTop));
+        ToolTip.SetTip(comboPadTop, Se.Language.General.Top);
+        comboPadTop.WithAccessibleName(Se.Language.General.Top);
+        comboPadTop.SelectionChanged += vm.ComboChanged;
+        var comboPadBottom = UiUtil.MakeComboBox(vm.BoxPaddingValues, vm, nameof(vm.BoxPaddingBottom));
+        ToolTip.SetTip(comboPadBottom, Se.Language.General.Bottom);
+        comboPadBottom.WithAccessibleName(Se.Language.General.Bottom);
+        comboPadBottom.SelectionChanged += vm.ComboChanged;
+        var panelBoxPadding = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 3,
+            VerticalAlignment = VerticalAlignment.Center,
+            Children = { comboPadLeft, comboPadRight, comboPadTop, comboPadBottom }
+        };
+        var labelBoxPadding = UiUtil.MakeLabel(Se.Language.General.BoxPadding);
+        grid.Add(labelBoxPadding, 4, 4);
+        grid.Add(panelBoxPadding, 4, 5);
+
+        var labelBoxType = UiUtil.MakeLabel(Se.Language.Video.BurnIn.BoxType);
+        var comboBoxBoxType = UiUtil.MakeComboBox(vm.BoxTypes, vm, nameof(vm.SelectedBoxType));
+        comboBoxBoxType.SelectionChanged += vm.ComboChanged;
+        grid.Add(labelBoxType, 5, 4);
+        grid.Add(comboBoxBoxType, 5, 5);
+        
+        var labelFrameRate = UiUtil.MakeLabel(Se.Language.General.FrameRate);
+        var comboBoxFrameRate = UiUtil.MakeComboBox(vm.FrameRates, vm, nameof(vm.SelectedFrameRate)).WithFrameRateDisplay();
+        comboBoxFrameRate.SelectionChanged += vm.ComboChanged;
+        grid.Add(labelFrameRate, 6, 4);
+        grid.Add(comboBoxFrameRate, 6, 5);
+
+        // SE4's "3D": the subtitle drawn once per eye for frame-packed 3D video. D-Cinema has only
+        // the depth, as the Z-position (see IsMode3DVisible).
+        var label3D = UiUtil.MakeLabel(Se.Language.File.Export.Stereo3D);
+        label3D.Bind(IsVisibleProperty, new Binding(nameof(vm.IsMode3DVisible)) { Source = vm });
+        var comboBox3D = UiUtil.MakeComboBox(vm.Modes3D, vm, nameof(vm.SelectedMode3D));
+        comboBox3D.Bind(IsVisibleProperty, new Binding(nameof(vm.IsMode3DVisible)) { Source = vm });
+        var labelDepth3D = UiUtil.MakeLabel(string.Empty).WithBindText(vm, nameof(vm.Depth3DText));
+        var comboBoxDepth3D = UiUtil.MakeComboBox(vm.Depths3D, vm, nameof(vm.SelectedDepth3D));
+        comboBoxDepth3D.Bind(IsEnabledProperty, new Binding(nameof(vm.IsDepth3DEnabled)) { Source = vm });
+        if (Se.Settings.Appearance.ShowHints)
+        {
+            ToolTip.SetTip(comboBox3D, Se.Language.File.Export.Stereo3DHint);
+            ToolTip.SetTip(comboBoxDepth3D, Se.Language.File.Export.Depth3DHint);
+        }
+
+        grid.Add(label3D, 7, 0);
+        grid.Add(comboBox3D, 7, 1);
+        grid.Add(labelDepth3D, 7, 2);
+        grid.Add(comboBoxDepth3D, 7, 3);
+
+        // Only shown for the formats that can use a frame-sized image (see IsFullFrameVisible).
+        var checkBoxFullFrame = UiUtil.MakeCheckBox(Se.Language.File.Export.FullFrameImage, vm, nameof(vm.IsFullFrame));
+        checkBoxFullFrame.IsCheckedChanged += vm.CheckBoxChanged;
+        var colorPickerFullFrame = UiUtil.MakeColorPickerButton(vm, nameof(vm.FullFrameBackgroundColor), true);
+        colorPickerFullFrame.Bind(IsVisibleProperty, new Binding(nameof(vm.IsFullFrame)) { Source = vm });
+        if (Se.Settings.Appearance.ShowHints)
+        {
+            ToolTip.SetTip(checkBoxFullFrame, Se.Language.File.Export.FullFrameImageHint);
+            ToolTip.SetTip(colorPickerFullFrame, Se.Language.General.BackgroundColor);
+        }
+
+        var panelFullFrame = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 5,
+            VerticalAlignment = VerticalAlignment.Center,
+            Children = { checkBoxFullFrame, colorPickerFullFrame },
+        }.WithBindIsVisible(vm, nameof(vm.IsFullFrameVisible));
+        grid.Add(panelFullFrame, 7, 5, 1, 3);
+
+        // A 3D Blu-ray's own depth for each subtitle, from its 3D-Plane (see Stereo3DPlane).
+        var labelPlane3D = UiUtil.MakeLabel(Se.Language.File.Export.Plane3D);
+        var buttonBrowsePlane3D = UiUtil.MakeButton(vm.BrowsePlane3DCommand, IconNames.FolderOpen, Se.Language.File.Export.OpenPlane3DTitle);
+        buttonBrowsePlane3D.Bind(IsEnabledProperty, new Binding(nameof(vm.IsDepth3DEnabled)) { Source = vm });
+        var labelPlane3DFile = UiUtil.MakeLabel(string.Empty).WithBindText(vm, nameof(vm.Plane3DText));
+        var buttonClearPlane3D = UiUtil.MakeButton(vm.ClearPlane3DCommand, IconNames.Close, Se.Language.General.Clear)
+            .WithBindIsVisible(vm, nameof(vm.IsPlane3DLoaded));
+        if (Se.Settings.Appearance.ShowHints)
+        {
+            ToolTip.SetTip(labelPlane3D, Se.Language.File.Export.Plane3DHint);
+        }
+
+        var panelPlane3D = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 5,
+            VerticalAlignment = VerticalAlignment.Center,
+            Children = { buttonBrowsePlane3D, labelPlane3DFile, buttonClearPlane3D },
+        };
+        labelPlane3D.Bind(IsVisibleProperty, new Binding(nameof(vm.IsMode3DVisible)) { Source = vm });
+        panelPlane3D.Bind(IsVisibleProperty, new Binding(nameof(vm.IsMode3DVisible)) { Source = vm });
+        grid.Add(labelPlane3D, 8, 0);
+        grid.Add(panelPlane3D, 8, 1, 1, 7);
+
+        return UiUtil.MakeBorderForControl(grid);
+    }
+
+    private static Border MakePreviewView(ExportImageBasedViewModel vm)
+    {
+        var grid = new Grid
+        {
+            RowDefinitions =
+            {
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Star) },
+            },
+            ColumnDefinitions =
+            {
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) },
+            },
+            Width = double.NaN,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+
+        var imagePreview = new Image
+        {
+            MaxHeight = 200,
+            Stretch = Stretch.Uniform,
+        };
+        imagePreview.Bind(Image.SourceProperty, new Binding(nameof(vm.BitmapPreview))
+        {
+            Source = vm,
+            Mode = BindingMode.OneWay
+        });
+
+        var labelImageInfo = UiUtil.MakeLabel(string.Empty).WithBindText(vm, nameof(vm.ImageInfo));   
+        var panelImageInfo = new StackPanel
+        {
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Top,
+            Background = UiUtil.GetBorderBrush(),
+            Opacity = 0.8,
+            Children =
+            {
+                UiUtil.MakeBorderForControl(labelImageInfo),
+            }
+        };
+
+        var buttonSavePreview = new Button
+        {
+            Content = Se.Language.General.SaveDotDotDot,
+            Command = vm.SavePreviewCommand,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Opacity = 0.8,
+        };
+
+        var buttonShowPreview = new Button
+        {
+            Content = Se.Language.General.ShowPreview,
+            Command = vm.ShowPreviewCommand,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Opacity = 0.8,
+        };
+
+        var panelButtons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Spacing = 5,
+            Children =
+            {
+                buttonSavePreview,
+                buttonShowPreview
+            }
+        };
+
+
+        grid.Add(imagePreview, 0);
+        grid.Add(panelImageInfo, 0);
+        grid.Add(panelButtons, 0);
+
+        return UiUtil.MakeBorderForControl(grid).WithHeight(204);
+    }
+
+    private static Grid MakeProgressView(ExportImageBasedViewModel vm)
+    {
+        var progressBar = UiUtil.MakeProgressBar();
+        progressBar.Bind(ProgressBar.ValueProperty, new Binding(nameof(vm.ProgressValue)));
+        progressBar.Bind(ProgressBar.IsVisibleProperty, new Binding(nameof(vm.IsGenerating)));
+
+        var statusText = new TextBlock
+        {
+            // The bar and the text shared one grid cell, with this top margin as the only
+            // thing keeping them apart - so they ended up touching. Own row, own breathing room.
+            Margin = new Thickness(5, 8, 0, 0),
+        };
+        statusText.Bind(TextBlock.TextProperty, new Binding(nameof(vm.ProgressText)));
+        statusText.Bind(TextBlock.IsVisibleProperty, new Binding(nameof(vm.IsGenerating)));
+
+        var grid = new Grid
+        {
+            RowDefinitions =
+            {
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+            },
+            ColumnDefinitions =
+            {
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) },
+            },
+            Width = double.NaN,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+
+        grid.Add(progressBar, 0, 0);
+        grid.Add(statusText, 1, 0);
+
+        return grid;
+    }
+}

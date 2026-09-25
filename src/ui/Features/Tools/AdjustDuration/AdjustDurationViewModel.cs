@@ -1,0 +1,335 @@
+using Avalonia.Controls;
+using Avalonia.Input;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Nikse.SubtitleEdit.Core.Common;
+using Nikse.SubtitleEdit.Features.Main;
+using Nikse.SubtitleEdit.Features.Shared;
+using Nikse.SubtitleEdit.Logic;
+using Nikse.SubtitleEdit.Logic.Config;
+using Nikse.SubtitleEdit.UiLogic.AdjustDuration;
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Nikse.SubtitleEdit.Features.Tools.AdjustDuration;
+
+public partial class AdjustDurationViewModel : ObservableObject
+{
+    [ObservableProperty] private ObservableCollection<AdjustDurationDisplay> _adjustTypes;
+    [ObservableProperty] private AdjustDurationDisplay _selectedAdjustType;
+
+    [ObservableProperty] private double _adjustSeconds;
+    [ObservableProperty] private int _adjustPercent;
+    [ObservableProperty] private double _adjustFixed;
+    [ObservableProperty] private double _adjustRecalculateMaxCharacterPerSecond;
+    [ObservableProperty] private double _adjustRecalculateOptimalCharacterPerSecond;
+    [ObservableProperty] private bool _extendOnly;
+
+    public Window? Window { get; set; }
+
+    public bool OkPressed { get; private set; }
+
+    private ISet<SubtitleLineViewModel>? _onlyLines;
+
+    private bool IsSkipped(SubtitleLineViewModel line) => _onlyLines != null && !_onlyLines.Contains(line);
+
+    public AdjustDurationViewModel()
+    {
+        AdjustTypes = new ObservableCollection<AdjustDurationDisplay>(AdjustDurationDisplay.ListAll());
+        SelectedAdjustType = AdjustTypes[0];
+        LoadSettings();
+    }
+
+    /// <summary>
+    /// Adjusts every line in <paramref name="subtitles"/>, or only those in <paramref name="onlyLines"/>
+    /// when given. The whole list is still walked so a limited line is capped against its real
+    /// neighbour in the grid, not against the next line that happened to be selected.
+    /// </summary>
+    public void AdjustDuration(ObservableCollection<SubtitleLineViewModel> subtitles, ISet<SubtitleLineViewModel>? onlyLines = null)
+    {
+        _onlyLines = onlyLines;
+        if (SelectedAdjustType.Type == AdjustDurationType.Seconds)
+        {
+            DoAdjustViaSeconds(subtitles);
+        }
+        else if (SelectedAdjustType.Type == AdjustDurationType.Fixed)
+        {
+            DoAdjustViaFixed(subtitles);
+        }
+        else if (SelectedAdjustType.Type == AdjustDurationType.Percent)
+        {
+            DoAdjustViaPercent(subtitles);
+        }
+        else if (SelectedAdjustType.Type == AdjustDurationType.Recalculate)
+        {
+            DoAdjustViaRecalculate(subtitles, ExtendOnly);
+        }
+    }
+
+    private void DoAdjustViaSeconds(ObservableCollection<SubtitleLineViewModel> subtitles)
+    {
+        for (var i = 0; i < subtitles.Count; i++)
+        {
+            var subtitle = subtitles[i];
+            if (IsSkipped(subtitle))
+            {
+                continue;
+            }
+
+            var nextSubtitle = subtitles.GetOrNull(i + 1);
+            var newEndTime = subtitle.EndTime + TimeSpan.FromSeconds(AdjustSeconds);
+
+            // A negative adjustment must not push the end time before the start time
+            var minEndTime = subtitle.StartTime + TimeSpan.FromMilliseconds(100);
+            if (AdjustSeconds < 0 && newEndTime < minEndTime)
+            {
+                newEndTime = minEndTime;
+            }
+
+            if (nextSubtitle != null && newEndTime <= nextSubtitle.StartTime || nextSubtitle == null)
+            {
+                subtitle.EndTime = newEndTime;
+            }
+            else if (nextSubtitle != null && newEndTime > nextSubtitle.StartTime)
+            {
+                var cappedEndTime = nextSubtitle.StartTime - TimeSpan.FromMilliseconds(10);
+                if (cappedEndTime > subtitle.EndTime)
+                {
+                    subtitle.EndTime = cappedEndTime;
+                }
+            }
+        }
+    }
+
+    private void DoAdjustViaFixed(ObservableCollection<SubtitleLineViewModel> subtitles)
+    {
+        for (int i = 0; i < subtitles.Count; i++)
+        {
+            var subtitle = subtitles[i];
+            if (IsSkipped(subtitle))
+            {
+                continue;
+            }
+
+            var nextSubtitle = subtitles.GetOrNull(i + 1);
+            var adjustment = TimeSpan.FromSeconds(AdjustFixed);
+            var newEndTime = subtitle.StartTime + adjustment;
+
+            if (nextSubtitle != null && newEndTime > nextSubtitle.StartTime)
+            {
+                // Leave the minimum gap and keep a positive duration, as libse's
+                // SetFixedDuration / AdjustDisplayTimeUsingPercent do (so the dialog and Batch
+                // convert agree). Capping flat at next.Start gave a ZERO-duration line whenever
+                // two rows share a start time, and a negative one when rows are out of order -
+                // the DoAdjustViaSeconds branch above already floors its result.
+                subtitle.EndTime = ClampEndTime(subtitle.StartTime, nextSubtitle.StartTime);
+            }
+            else
+            {
+                subtitle.EndTime = newEndTime;
+            }
+        }
+    }
+
+
+    /// <summary>
+    /// An end time that leaves the configured minimum gap before <paramref name="nextStartTime"/>
+    /// and is still at least 1 ms after <paramref name="startTime"/>.
+    /// </summary>
+    private static TimeSpan ClampEndTime(TimeSpan startTime, TimeSpan nextStartTime)
+    {
+        var capped = nextStartTime - TimeSpan.FromMilliseconds(Configuration.Settings.General.MinimumMillisecondsBetweenLines);
+        if (capped <= startTime)
+        {
+            capped = startTime + TimeSpan.FromMilliseconds(1);
+        }
+
+        return capped;
+    }
+
+    private void DoAdjustViaPercent(ObservableCollection<SubtitleLineViewModel> subtitles)
+    {
+        for (int i = 0; i < subtitles.Count; i++)
+        {
+            var subtitle = subtitles[i];
+            if (IsSkipped(subtitle))
+            {
+                continue;
+            }
+
+            var nextSubtitle = subtitles.GetOrNull(i + 1);
+
+            var originalDuration = subtitle.EndTime - subtitle.StartTime;
+            var newDuration = originalDuration.TotalSeconds * (AdjustPercent / 100.0);
+            var newEndTime = subtitle.StartTime + TimeSpan.FromSeconds(newDuration);
+
+            if (nextSubtitle != null && newEndTime > nextSubtitle.StartTime)
+            {
+                // Leave the minimum gap and keep a positive duration, as libse's
+                // SetFixedDuration / AdjustDisplayTimeUsingPercent do (so the dialog and Batch
+                // convert agree). Capping flat at next.Start gave a ZERO-duration line whenever
+                // two rows share a start time, and a negative one when rows are out of order -
+                // the DoAdjustViaSeconds branch above already floors its result.
+                subtitle.EndTime = ClampEndTime(subtitle.StartTime, nextSubtitle.StartTime);
+            }
+            else
+            {
+                subtitle.EndTime = newEndTime;
+            }
+        }
+    }
+
+    private void DoAdjustViaRecalculate(ObservableCollection<SubtitleLineViewModel> subtitles, bool extendOnly)
+    {
+        for (int i = 0; i < subtitles.Count; i++)
+        {
+            var subtitle = subtitles[i];
+            if (IsSkipped(subtitle))
+            {
+                continue;
+            }
+
+            // Count like the grid's CPS column does (tags and line breaks stripped), so the
+            // recalculated durations actually land at the requested chars-per-second.
+            var charCount = (double)(subtitle.Text ?? string.Empty).CountCharacters(true);
+
+            // Whole milliseconds, rounded up: a fractional duration truncates to one ms short on
+            // save, which puts the line just over the CPS it was computed for (#14418).
+            var optimalDuration = CpsHelper.GetDurationForCps(charCount, AdjustRecalculateOptimalCharacterPerSecond);
+            var maxDuration = CpsHelper.GetDurationForCps(charCount, AdjustRecalculateMaxCharacterPerSecond);
+
+            var nextSubtitle = subtitles.GetOrNull(i + 1);
+            var maxEndTime = nextSubtitle?.StartTime ?? TimeSpan.MaxValue;
+
+            var proposedEndTime = subtitle.StartTime + optimalDuration;
+            var fallbackEndTime = subtitle.StartTime + maxDuration;
+
+            var oldEndTime = subtitle.EndTime;
+
+            if (proposedEndTime <= maxEndTime)
+            {                
+                subtitle.EndTime = proposedEndTime;
+            }
+            else if (fallbackEndTime <= maxEndTime)
+            {
+                subtitle.EndTime = fallbackEndTime;
+            }
+            else
+            {
+                subtitle.EndTime = maxEndTime;
+            }
+
+            if (extendOnly && subtitle.EndTime < oldEndTime)
+            {
+                subtitle.EndTime = oldEndTime;
+            }
+        }
+    }
+
+    private void LoadSettings()
+    {
+        AdjustSeconds = Se.Settings.Tools.AdjustDurations.AdjustDurationSeconds;
+        AdjustPercent = Se.Settings.Tools.AdjustDurations.AdjustDurationPercent;
+        AdjustFixed = Se.Settings.Tools.AdjustDurations.AdjustDurationFixed;
+        AdjustRecalculateMaxCharacterPerSecond = Se.Settings.Tools.AdjustDurations.AdjustDurationMaximumCps;
+        AdjustRecalculateOptimalCharacterPerSecond = Se.Settings.Tools.AdjustDurations.AdjustDurationOptimalCps;
+        ExtendOnly = Se.Settings.Tools.AdjustDurations.AdjustDurationExtendOnly;
+
+        SelectedAdjustType = AdjustTypes.FirstOrDefault(p =>
+                                 p.Type.ToString() == Se.Settings.Tools.AdjustDurations.AdjustDurationLast)
+                             ?? AdjustTypes[0];
+        ;
+    }
+
+    private void SaveSettings()
+    {
+        Se.Settings.Tools.AdjustDurations.AdjustDurationSeconds = AdjustSeconds;
+        Se.Settings.Tools.AdjustDurations.AdjustDurationPercent = AdjustPercent;
+        Se.Settings.Tools.AdjustDurations.AdjustDurationFixed = AdjustFixed;
+        Se.Settings.Tools.AdjustDurations.AdjustDurationMaximumCps = AdjustRecalculateMaxCharacterPerSecond;
+        Se.Settings.Tools.AdjustDurations.AdjustDurationOptimalCps = AdjustRecalculateOptimalCharacterPerSecond;
+        Se.Settings.Tools.AdjustDurations.AdjustDurationExtendOnly = ExtendOnly;
+
+        Se.Settings.Tools.AdjustDurations.AdjustDurationLast = SelectedAdjustType.Type.ToString();
+
+        Se.SaveSettings();
+    }
+
+    [RelayCommand]
+    private async Task Ok()
+    {
+        var msg = GetValidationError();
+        if (!string.IsNullOrEmpty(msg))
+        {
+            await MessageBox.Show(Window!, Se.Language.General.Error, msg, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        SaveSettings();
+        OkPressed = true;
+        Window?.Close();
+    }
+
+    [RelayCommand]
+    private void Cancel()
+    {
+        Window?.Close();
+    }
+
+    private string GetValidationError()
+    {
+        if (Window == null)
+        {
+            return "Window is null";
+        }
+
+        if (SelectedAdjustType.Type == AdjustDurationType.Seconds)
+        {
+        }
+        else if (SelectedAdjustType.Type == AdjustDurationType.Percent)
+        {
+            if (AdjustPercent <= 0)
+            {
+                return string.Format(Se.Language.General.PleaseEnterAValidValueForX, Se.Language.General.Percent);
+            }
+        }
+        else if (SelectedAdjustType.Type == AdjustDurationType.Fixed)
+        {
+            if (AdjustFixed <= 0)
+            {
+                return string.Format(Se.Language.General.PleaseEnterAValidValueForX, Se.Language.General.FixedValue);
+            }
+        }
+        else if (SelectedAdjustType.Type == AdjustDurationType.Recalculate)
+        {
+            if (AdjustRecalculateMaxCharacterPerSecond <= 1)
+            {
+                return string.Format(Se.Language.General.PleaseEnterAValidValueForX, Se.Language.General.MaxCharactersPerSecond);
+            }
+
+            if (AdjustRecalculateOptimalCharacterPerSecond <= 1)
+            {
+                return string.Format(Se.Language.General.PleaseEnterAValidValueForX, Se.Language.General.OptimalCharactersPerSecond);
+            }
+        }
+
+        return string.Empty;
+    }
+
+    internal void OnKeyDown(KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape)
+        {
+            e.Handled = true;
+            Window?.Close();
+        }
+        else if (UiUtil.IsHelp(e))
+        {
+            e.Handled = true;
+            UiUtil.ShowHelp("features/adjust-duration");
+        }
+    }
+}

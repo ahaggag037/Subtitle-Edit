@@ -1,0 +1,238 @@
+﻿using Nikse.SubtitleEdit.Core.Common;
+using Nikse.SubtitleEdit.Core.SubtitleFormats;
+using Nikse.SubtitleEdit.UiLogic.Translate;
+using System;
+using System.Collections.Generic;
+using System.Net.Http;
+using System.Text;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using Nikse.SubtitleEdit.Core.Settings;
+using Nikse.SubtitleEdit.UiLogic.Http;
+
+namespace Nikse.SubtitleEdit.UiLogic.AutoTranslate
+{
+    public class PerplexityTranslate : IAutoTranslator, IDisposable
+    {
+        private HttpClient _httpClient = null!;
+
+        public static string StaticName { get; set; } = "Perplexity";
+        public override string ToString() => StaticName;
+        public string Name => StaticName;
+        public string Url => "https://www.perplexity.ai/";
+        public string Error { get; set; } = string.Empty;
+        public int MaxCharacters => 1500;
+
+        /// <summary>
+        /// See https://docs.perplexity.ai/docs/agent-api/models
+        /// </summary>
+        public static string[] Models => new[]
+        {
+            "perplexity/sonar",
+            "openai/gpt-5.6-sol",
+            "openai/gpt-5.6-terra",
+            "openai/gpt-5.6-luna",
+            "anthropic/claude-opus-5",
+            "anthropic/claude-opus-4-8",
+            "anthropic/claude-sonnet-5",
+            "anthropic/claude-haiku-4-5",
+            "google/gemini-3.8-flash",
+            "google/gemini-3.7-flash",
+            "google/gemini-3.6-flash",
+            "google/gemini-3.5-flash",
+            "google/gemini-3.1-pro-preview",
+            "google/gemini-3.1-flash-lite",
+            "xai/grok-4.6",
+            "xai/grok-4.5",
+            "perplexity/glm-5.3",
+            "perplexity/kimi-k3",
+            "perplexity/kimi-k2.7-code",
+        };
+
+        /// <summary>
+        /// Endpoint used when the url in settings is only the service base - see <see cref="AutoTranslateUrl"/>.
+        /// </summary>
+        public const string DefaultUrl = "https://api.perplexity.ai/v1/responses";
+
+        public void Initialize()
+        {
+            _httpClient?.Dispose();
+            _httpClient = HttpClientFactoryWithProxy.CreateHttpClientWithProxy();
+            _httpClient.DefaultRequestHeaders.TryAddWithoutValidation("Content-Type", "application/json");
+            _httpClient.DefaultRequestHeaders.TryAddWithoutValidation("accept", "application/json");
+            _httpClient.BaseAddress = new Uri(AutoTranslateUrl.Complete(Configuration.Settings.Tools.PerplexityUrl, DefaultUrl));
+            _httpClient.Timeout = TimeSpan.FromMinutes(15);
+
+            if (!string.IsNullOrEmpty(Configuration.Settings.Tools.PerplexityApiKey))
+            {
+                _httpClient.DefaultRequestHeaders.TryAddWithoutValidation("Authorization", "Bearer " + Configuration.Settings.Tools.PerplexityApiKey);
+            }
+        }
+
+        public List<TranslationPair> GetSupportedSourceLanguages()
+        {
+            return ListLanguages();
+        }
+
+        public List<TranslationPair> GetSupportedTargetLanguages()
+        {
+            return ListLanguages();
+        }
+
+        // CURL example for Perplexity API:
+        // curl https://api.perplexity.ai/v1/responses \
+        //     -H "Authorization: Bearer $PERPLEXITY_API_KEY" \
+        //     -H "Content-Type: application/json" \
+        //     -d '{
+        //     "model": "openai/gpt-5-mini",
+        //     "input": "Translate this to French: Hello, how are you?",
+        //     "instructions": "You are a professional translator."
+        // }'
+
+        // Response example:
+        // {
+        //     "id": "resp_1234567890",
+        //     "object": "response",
+        //     "created_at": 1756485272,
+        //     "model": "openai/gpt-5.1",
+        //     "status": "completed",
+        //     "output": [
+        //     {
+        //         "type": "message",
+        //         "role": "assistant",
+        //         "content": [
+        //         {
+        //             "type": "output_text",
+        //             "text": "Recent developments in AI include...",
+        //             "annotations": [
+        //             {
+        //                 "type": "citation",
+        //                 "url": "https://example.com/article1"
+        //             }
+        //             ]
+        //         }
+        //         ]
+        //     }
+        //     ]
+        // }
+
+        public async Task<string> Translate(string text, string sourceLanguageCode, string targetLanguageCode, CancellationToken cancellationToken)
+        {
+            var model = Configuration.Settings.Tools.PerplexityModel;
+            if (string.IsNullOrEmpty(model))
+            {
+                model = Models[0];
+                Configuration.Settings.Tools.PerplexityModel = model;
+            }
+
+            if (string.IsNullOrEmpty(Configuration.Settings.Tools.PerplexityPrompt))
+            {
+                Configuration.Settings.Tools.PerplexityPrompt = new ToolsSettings().PerplexityPrompt;
+            }
+
+            var prompt = string.Format(Configuration.Settings.Tools.PerplexityPrompt, sourceLanguageCode, targetLanguageCode);
+            var input = prompt + Environment.NewLine + Environment.NewLine + text;
+
+            // Build JSON request body according to Perplexity API
+            var requestBody = $"{{\"model\":\"{Json.EncodeJsonText(model)}\",\"input\":\"{Json.EncodeJsonText(input)}\",\"instructions\":\"{Json.EncodeJsonText(prompt)}\"}}";
+
+            var content = new StringContent(requestBody, Encoding.UTF8, "application/json");
+            var result = await _httpClient.PostAsync("/v1/responses", content, cancellationToken);
+            var bytes = await result.Content.ReadAsByteArrayAsync(cancellationToken);
+            var json = Encoding.UTF8.GetString(bytes).Trim();
+            if (!result.IsSuccessStatusCode)
+            {
+                Error = json;
+                SeLogger.Error("Perplexity Translate failed calling API: Status code=" + result.StatusCode + Environment.NewLine +
+                    json + Environment.NewLine +
+                    "input: " + input + Environment.NewLine +
+                    "url: " + _httpClient.BaseAddress + "/v1/responses");
+            }
+
+            result.EnsureSuccessStatusCode();
+
+            var outputText = GetOutputText(json).Trim();
+            if (string.IsNullOrEmpty(outputText))
+            {
+                Error = json;
+                SeLogger.Error("Perplexity Translate returned no output text: " + json);
+                return string.Empty;
+            }
+
+            if (outputText.StartsWith('"') && outputText.EndsWith('"') && !text.StartsWith('"'))
+            {
+                outputText = outputText.Trim('"').Trim();
+            }
+
+            outputText = ChatGptTranslate.FixNewLines(outputText);
+            outputText = ChatGptTranslate.RemovePreamble(text, outputText);
+            outputText = ChatGptTranslate.DecodeUnicodeEscapes(outputText);
+            return outputText.Trim();
+        }
+
+        /// <summary>
+        /// Gets the assistant text from a /v1/responses reply. "output" is an array whose first items can be
+        /// "search_results"/"fetch_url_results" (web search is on by default for Sonar), so the text has to be
+        /// taken from the "message" items rather than from output[0].
+        /// </summary>
+        public static string GetOutputText(string json)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(json);
+                var root = document.RootElement;
+                if (root.ValueKind != JsonValueKind.Object)
+                {
+                    return string.Empty;
+                }
+
+                var sb = new StringBuilder();
+                if (root.TryGetProperty("output", out var output) && output.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var item in output.EnumerateArray())
+                    {
+                        if (item.ValueKind != JsonValueKind.Object ||
+                            !item.TryGetProperty("type", out var type) || type.GetString() != "message" ||
+                            !item.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
+                        {
+                            continue;
+                        }
+
+                        foreach (var part in content.EnumerateArray())
+                        {
+                            if (part.ValueKind == JsonValueKind.Object &&
+                                part.TryGetProperty("type", out var partType) && partType.GetString() == "output_text" &&
+                                part.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String)
+                            {
+                                sb.Append(text.GetString());
+                            }
+                        }
+                    }
+                }
+
+                if (sb.Length == 0 &&
+                    root.TryGetProperty("output_text", out var outputText) && outputText.ValueKind == JsonValueKind.String)
+                {
+                    sb.Append(outputText.GetString());
+                }
+
+                return sb.ToString();
+            }
+            catch (JsonException)
+            {
+                return string.Empty;
+            }
+        }
+
+        public static List<TranslationPair> ListLanguages()
+        {
+            return ChatGptTranslate.ListLanguages();
+        }
+
+        public void Dispose()
+        {
+            _httpClient?.Dispose();
+        }
+    }
+}

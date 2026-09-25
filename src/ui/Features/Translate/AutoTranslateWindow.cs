@@ -1,0 +1,572 @@
+﻿using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Controls.Templates;
+using Avalonia.Data;
+using Avalonia.Input;
+using Avalonia.Interactivity;
+using Avalonia.Layout;
+using Avalonia.Media;
+using Avalonia.Threading;
+using Nikse.SubtitleEdit.UiLogic.AutoTranslate;
+using Nikse.SubtitleEdit.Features.Translate.LlamaCppAdvanced;
+using Nikse.SubtitleEdit.Features.Video.SpeechToText;
+using Nikse.SubtitleEdit.Features.Video.SpeechToText.Engines;
+using Nikse.SubtitleEdit.Logic;
+using Nikse.SubtitleEdit.Logic.Config;
+using Nikse.SubtitleEdit.Logic.Download;
+using Nikse.SubtitleEdit.Logic.LlamaCpp;
+using System.ComponentModel;
+using Nikse.SubtitleEdit.UiLogic.LlamaCpp;
+using Nikse.SubtitleEdit.UiLogic.Translate;
+
+namespace Nikse.SubtitleEdit.Features.Translate;
+
+public class AutoTranslateWindow : Window
+{
+    private readonly AutoTranslateViewModel _vm;
+    private Button? _buttonTranslate;
+    private Button? _buttonOk;
+
+    public AutoTranslateWindow(AutoTranslateViewModel vm)
+    {
+        UiUtil.InitializeWindow(this, GetType().Name);
+        Title = UiUtil.MakeWindowTitle(Se.Language.General.AutoTranslate);
+        Width = 1050;
+        MinWidth = 800;
+        Height = 780;
+        MinHeight = 480;
+
+        DataContext = vm;
+        vm.Window = this;
+        _vm = vm;
+
+        var rowGridCard = BuildRowGridCard(vm);
+        var controlsCard = BuildControlsCard(vm);
+        var apiConfigCard = BuildApiConfigCard(vm);
+        var footer = BuildFooter(vm);
+
+        var grid = new Grid
+        {
+            RowDefinitions = new RowDefinitions("*,Auto,Auto,Auto"),
+            RowSpacing = 10,
+            Margin = UiUtil.MakeWindowMargin(),
+        };
+
+        var row = 0;
+        grid.Children.Add(rowGridCard);
+        Grid.SetRow(rowGridCard, row++);
+
+        grid.Children.Add(controlsCard);
+        Grid.SetRow(controlsCard, row++);
+
+        grid.Children.Add(apiConfigCard);
+        Grid.SetRow(apiConfigCard, row++);
+
+        grid.Children.Add(footer);
+        Grid.SetRow(footer, row++);
+
+        Content = grid;
+
+        ApplyButtonAccentStates(vm);
+        vm.PropertyChanged += OnViewModelPropertyChanged;
+
+        AddHandler(KeyDownEvent, (_, e) => _vm.PreviewKeyDown(e), RoutingStrategies.Tunnel, handledEventsToo: false);
+
+        Loaded += (s, e) => UiUtil.RestoreWindowPosition(this);
+
+        // Start out on the accented button so it is selected, not just coloured like it - Enter
+        // then starts the translation right away. First activation only: coming back from a
+        // dialog must not pull focus away from where the user left it.
+        UiUtil.FocusOnFirstActivation(this, () => _buttonTranslate?.Focus());
+    }
+
+    private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (sender is not AutoTranslateViewModel vm)
+        {
+            return;
+        }
+
+        if (e.PropertyName is nameof(AutoTranslateViewModel.IsTranslatePrimary)
+            or nameof(AutoTranslateViewModel.IsOkPrimary))
+        {
+            ApplyButtonAccentStates(vm);
+        }
+    }
+
+    private void ApplyButtonAccentStates(AutoTranslateViewModel vm)
+    {
+        SetAccent(_buttonTranslate, vm.IsTranslatePrimary);
+        SetAccent(_buttonOk, vm.IsOkPrimary);
+
+        // A focused button answers Enter itself, so let the focus follow the accent when OK takes
+        // over as the default button after a translation - otherwise Enter would keep translating.
+        // Posted: this runs from the first of the property changes that flip the two buttons, and
+        // OK is still disabled (hence unfocusable) until its own IsEnabled binding has caught up.
+        if (vm.IsOkPrimary && _buttonTranslate?.IsFocused == true)
+        {
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (_vm.IsOkPrimary && _buttonTranslate?.IsFocused == true)
+                {
+                    _buttonOk?.Focus();
+                }
+            });
+        }
+    }
+
+    private static void SetAccent(Button? button, bool accent)
+    {
+        if (button == null)
+        {
+            return;
+        }
+
+        if (accent)
+        {
+            if (!button.Classes.Contains("accent"))
+            {
+                button.Classes.Add("accent");
+            }
+        }
+        else
+        {
+            button.Classes.Remove("accent");
+        }
+    }
+
+    private static Border BuildControlsCard(AutoTranslateViewModel vm)
+    {
+        var engineLabel = UiUtil.MakeTextBlock(Se.Language.General.Engine);
+        engineLabel.VerticalAlignment = VerticalAlignment.Center;
+        engineLabel.Margin = new Thickness(0, 0, 8, 0);
+
+        var engineCombo = UiUtil.MakeComboBox(vm.AutoTranslators, vm, nameof(vm.SelectedAutoTranslator));
+        engineCombo.MinWidth = 220;
+        engineCombo.WithLabeledBy(engineLabel);
+        engineCombo.ItemTemplate = BuildTranslatorItemTemplate();
+        engineCombo.SelectionChanged += (s, e) =>
+        {
+            vm.AutoTranslatorChanged(engineCombo);
+        };
+
+        // Re-evaluate the engine combo's install-status dots after a download finishes - the
+        // FuncDataTemplate caches each row's dot when first realised, so a fresh template is
+        // the simplest way to refresh. The model combos already rebuild via PopulateModels.
+        vm.RefreshDownloadDots = () => engineCombo.ItemTemplate = BuildTranslatorItemTemplate();
+
+        // Appears only when the selected SE-managed engine (CrispASR/MADLAD or llama.cpp) is installed
+        // but outdated - i.e. it shows the amber "update available" dot - giving the user a way to act on it.
+        var updateEngineButton = UiUtil.MakeButton(Se.Language.General.Update, vm.UpdateEngineCommand)
+            .WithIconLeft(IconNames.Download)
+            .WithMarginLeft(8);
+        updateEngineButton.VerticalAlignment = VerticalAlignment.Center;
+        updateEngineButton.Bind(Button.IsVisibleProperty, new Binding(nameof(vm.EngineUpdateButtonIsVisible)));
+        ToolTip.SetTip(updateEngineButton, Se.Language.General.UpdateAvailable);
+
+        var fromLabel = UiUtil.MakeTextBlock(Se.Language.General.From);
+        fromLabel.VerticalAlignment = VerticalAlignment.Center;
+        fromLabel.Margin = new Thickness(16, 0, 8, 0);
+
+        var sourceCombo = UiUtil.MakeComboBox(vm.SourceLanguages!, vm, nameof(vm.SelectedSourceLanguage));
+        sourceCombo.MinWidth = 180;
+        sourceCombo.WithLabeledBy(fromLabel);
+
+        var swapButton = UiUtil.MakeButton(vm.SwapLanguagesCommand, IconNames.SwapVertical, Se.Language.Translate.SwapLanguages);
+        swapButton.Margin = new Thickness(8, 0);
+        swapButton.VerticalAlignment = VerticalAlignment.Center;
+
+        var toLabel = UiUtil.MakeTextBlock(Se.Language.General.To);
+        toLabel.VerticalAlignment = VerticalAlignment.Center;
+        toLabel.Margin = new Thickness(0, 0, 8, 0);
+
+        var targetCombo = UiUtil.MakeComboBox(vm.TargetLanguages!, vm, nameof(vm.SelectedTargetLanguage));
+        targetCombo.MinWidth = 180;
+        targetCombo.WithLabeledBy(toLabel);
+
+        var controlsPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+            Children =
+            {
+                engineLabel,
+                engineCombo,
+                updateEngineButton,
+                fromLabel,
+                sourceCombo,
+                swapButton,
+                toLabel,
+                targetCombo,
+            },
+        };
+
+        var poweredByLabel = UiUtil.MakeTextBlock(Se.Language.General.PoweredBy);
+        poweredByLabel.Foreground = UiUtil.GetTextColor(0.65);
+        poweredByLabel.FontSize = UiUtil.ScaledFontSize(11);
+        poweredByLabel.VerticalAlignment = VerticalAlignment.Center;
+
+        var poweredByLink = UiUtil.MakeLink("Google Translate V1", vm.GoToAutoTranslatorUriCommand, vm, nameof(vm.AutoTranslatorLinkText));
+        poweredByLink.FontSize = UiUtil.ScaledFontSize(11);
+        poweredByLink.VerticalAlignment = VerticalAlignment.Center;
+
+        var poweredByPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 6,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 0, 0, 6),
+            Children = { poweredByLabel, poweredByLink },
+        };
+
+        var stack = new StackPanel
+        {
+            Orientation = Orientation.Vertical,
+            Children = { poweredByPanel, controlsPanel },
+        };
+
+        return MakeCard(stack);
+    }
+
+    // Shared with batch convert's auto-translate view - see AutoTranslateCombos.
+    private static FuncDataTemplate<IAutoTranslator> BuildTranslatorItemTemplate()
+    {
+        return AutoTranslateCombos.EngineItemTemplate();
+    }
+
+    private static Border BuildApiConfigCard(AutoTranslateViewModel vm)
+    {
+        var buttonDownloadCrispAsr = UiUtil.MakeButton(string.Empty, vm.DownloadCrispAsrCommand)
+            .WithIconLeftBindText(IconNames.Download, nameof(vm.CrispAsrDownloadButtonText))
+            .WithMarginLeft(5);
+        buttonDownloadCrispAsr.Bind(Button.IsVisibleProperty, new Binding(nameof(vm.ButtonDownloadIsVisible)));
+
+        var crispAsrModelCombo = UiUtil.MakeComboBox(vm.CrispAsrModels, vm, nameof(vm.SelectedCrispAsrModel), nameof(vm.CrispAsrModelComboIsVisible));
+        crispAsrModelCombo.ItemTemplate = AutoTranslateCombos.CrispAsrModelItemTemplate();
+        crispAsrModelCombo.WithAccessibleName(Se.Language.General.Model);
+
+        var llamaCppModelCombo = UiUtil.MakeComboBox(vm.LlamaCppModels, vm, nameof(vm.SelectedLlamaCppModel), nameof(vm.LlamaCppModelComboIsVisible)).WithWidth(220);
+        llamaCppModelCombo.ItemTemplate = AutoTranslateCombos.LlamaCppModelItemTemplate();
+        llamaCppModelCombo.WithAccessibleName(Se.Language.General.Model);
+
+        var buttonDownloadLlamaCpp = UiUtil.MakeButton(string.Empty, vm.DownloadLlamaCppCommand)
+            .WithIconLeftBindText(IconNames.Download, nameof(vm.LlamaCppDownloadButtonText))
+            .WithMarginLeft(5);
+        buttonDownloadLlamaCpp.Bind(Button.IsVisibleProperty, new Binding(nameof(vm.LlamaCppButtonsAreVisible)));
+
+        var buttonLlamaCppServer = UiUtil.MakeButton(string.Empty, vm.ToggleLlamaCppServerCommand).WithMarginLeft(5);
+        buttonLlamaCppServer.Bind(Button.ContentProperty, new Binding(nameof(vm.LlamaCppServerButtonText)));
+        buttonLlamaCppServer.Bind(Button.IsVisibleProperty, new Binding(nameof(vm.LlamaCppButtonsAreVisible)));
+        if (Se.Settings.Appearance.ShowHints)
+        {
+            // The local server's live endpoint (random port) - see LlamaCppServerUrlInfo.
+            buttonLlamaCppServer.Bind(ToolTip.TipProperty, new Binding(nameof(vm.LlamaCppServerUrlInfo)));
+        }
+
+        var buttonLlamaCppOpenFolder = UiUtil.MakeButton(vm.OpenLlamaCppModelsFolderCommand, IconNames.FolderOpen, Se.Language.General.OpenContainingFolder)
+            .WithMarginLeft(5);
+        buttonLlamaCppOpenFolder.Bind(Button.IsVisibleProperty, new Binding(nameof(vm.LlamaCppButtonsAreVisible)));
+
+        var buttonLlamaCppEngineSettings = UiUtil.MakeButton(vm.ShowLlamaCppEngineSettingsCommand, IconNames.Settings)
+            .WithMarginLeft(5)
+            .WithAccessibleName(Se.Language.General.LlamaCppEngineSettings);
+        ToolTip.SetTip(buttonLlamaCppEngineSettings, Se.Language.General.LlamaCppEngineSettings);
+        buttonLlamaCppEngineSettings.Bind(Button.IsVisibleProperty, new Binding(nameof(vm.LlamaCppButtonsAreVisible)));
+
+        var buttonLlamaCppAdvancedSettings = UiUtil.MakeButton(Se.Language.General.AdvancedDotDotDot, vm.ShowLlamaCppAdvancedSettingsCommand)
+            .WithMarginLeft(5)
+            .WithAccessibleName(Se.Language.General.AdvancedSettings);
+        if (Se.Settings.Appearance.ShowHints)
+        {
+            ToolTip.SetTip(buttonLlamaCppAdvancedSettings, Se.Language.General.AdvancedSettings);
+        }
+        buttonLlamaCppAdvancedSettings.Bind(Button.IsVisibleProperty, new Binding(nameof(vm.LlamaCppAdvancedButtonIsVisible)));
+
+        var settingsPanel = new WrapPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        settingsPanel.Children.Add(UiUtil.MakeTextBlock(Se.Language.General.Id, vm, null, nameof(vm.ApiIdIsVisible)).WithMarginRight(5));
+        settingsPanel.Children.Add(UiUtil.MakeTextBox(150, vm, nameof(vm.ApiIdText), nameof(vm.ApiIdIsVisible)).WithMarginRight(15).WithAccessibleName(Se.Language.General.Id));
+
+        settingsPanel.Children.Add(UiUtil.MakeTextBlock(Se.Language.General.ApiSecret, vm, null, nameof(vm.ApiSecretIsVisible)).WithMarginRight(5));
+        settingsPanel.Children.Add(UiUtil.MakeTextBox(150, vm, nameof(vm.ApiSecretText), nameof(vm.ApiSecretIsVisible)).WithMarginRight(15).WithAccessibleName(Se.Language.General.ApiSecret));
+
+        settingsPanel.Children.Add(UiUtil.MakeTextBlock(Se.Language.General.ApiKey, vm, null, nameof(vm.ApiKeyIsVisible)).WithMarginRight(5));
+        var panelApiKey = UiUtil.MakeApiKeyTextBox(150, vm, nameof(vm.ApiKeyText), nameof(vm.ApiKeyIsVisible));
+        panelApiKey.Margin = new Thickness(0, 0, 15, 0);
+        settingsPanel.Children.Add(panelApiKey);
+
+        settingsPanel.Children.Add(UiUtil.MakeTextBlock(Se.Language.General.Formality, vm, null, nameof(vm.FormalityIsVisible)).WithMarginRight(5));
+        settingsPanel.Children.Add(UiUtil.MakeComboBox(vm.Formalities, vm, nameof(vm.SelectedFormality), nameof(vm.FormalityIsVisible)).WithWidth(220).WithMarginRight(15).WithAccessibleName(Se.Language.General.Formality));
+
+        var checkBoxLlamaCppRemote = UiUtil.MakeCheckBox(Se.Language.General.LlamaCppUseRemoteServer, vm, nameof(vm.LlamaCppUseRemoteServer)).WithMarginRight(15);
+        checkBoxLlamaCppRemote.Bind(CheckBox.IsVisibleProperty, new Binding(nameof(vm.LlamaCppRemoteToggleIsVisible)));
+        settingsPanel.Children.Add(checkBoxLlamaCppRemote);
+
+        settingsPanel.Children.Add(UiUtil.MakeTextBlock(Se.Language.General.Url, vm, null, nameof(vm.ApiUrlIsVisible)).WithMarginRight(5));
+        // Wide enough for typical ".../v1/chat/completions" endpoints, with the full value in a
+        // tooltip - a clipped URL hid a broken endpoint in #12907.
+        var textBoxApiUrl = UiUtil.MakeTextBox(300, vm, nameof(vm.ApiUrlText), nameof(vm.ApiUrlIsVisible)).WithMarginRight(15).WithAccessibleName(Se.Language.General.Url);
+        if (Se.Settings.Appearance.ShowHints)
+        {
+            textBoxApiUrl.Bind(ToolTip.TipProperty, new Binding(nameof(vm.ApiUrlText)));
+        }
+        settingsPanel.Children.Add(textBoxApiUrl);
+
+        settingsPanel.Children.Add(UiUtil.MakeTextBlock(Se.Language.General.Model, vm, null, nameof(vm.ModelIsVisible)).WithMarginRight(5));
+        settingsPanel.Children.Add(UiUtil.MakeTextBox(150, vm, nameof(vm.ModelText), nameof(vm.ModelTextBoxIsVisible)).WithAccessibleName(Se.Language.General.Model));
+
+        // The engines that know their models offer them in a drop-down; any other name can still be typed.
+        var modelCombo = UiUtil.MakeEditableComboBox(220, System.Array.Empty<string>(), vm, nameof(vm.ModelText)).WithAccessibleName(Se.Language.General.Model);
+        modelCombo.Bind(ComboBox.ItemsSourceProperty, new Binding(nameof(vm.ModelPresets)));
+        modelCombo.Bind(ComboBox.IsVisibleProperty, new Binding(nameof(vm.ModelComboIsVisible)));
+        settingsPanel.Children.Add(modelCombo);
+        settingsPanel.Children.Add(UiUtil.MakeButtonBrowse(vm.BrowseModelCommand, nameof(vm.ModelBrowseIsVisible), Se.Language.General.Model).WithMarginLeft(5));
+
+        settingsPanel.Children.Add(UiUtil.MakeTextBlock(Se.Language.General.Model, vm, null, nameof(vm.CrispAsrModelComboIsVisible)).WithMarginRight(5));
+        settingsPanel.Children.Add(crispAsrModelCombo);
+        settingsPanel.Children.Add(buttonDownloadCrispAsr);
+
+        settingsPanel.Children.Add(UiUtil.MakeTextBlock(Se.Language.General.Model, vm, null, nameof(vm.LlamaCppModelComboIsVisible)).WithMarginRight(5));
+        settingsPanel.Children.Add(llamaCppModelCombo);
+        settingsPanel.Children.Add(buttonDownloadLlamaCpp);
+        settingsPanel.Children.Add(buttonLlamaCppServer);
+        settingsPanel.Children.Add(buttonLlamaCppOpenFolder);
+        settingsPanel.Children.Add(buttonLlamaCppEngineSettings);
+        settingsPanel.Children.Add(buttonLlamaCppAdvancedSettings);
+
+        var settingsButton = UiUtil.MakeButton(vm.OpenSettingsCommand, IconNames.Settings, Se.Language.General.Settings);
+        settingsButton.HorizontalAlignment = HorizontalAlignment.Right;
+        settingsButton.VerticalAlignment = VerticalAlignment.Center;
+        settingsButton.Margin = new Thickness(8, 0, 0, 0);
+
+        var grid = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+        };
+        grid.Children.Add(settingsPanel);
+        Grid.SetColumn(settingsPanel, 0);
+        grid.Children.Add(settingsButton);
+        Grid.SetColumn(settingsButton, 1);
+
+        return MakeCard(grid);
+    }
+
+    private Border BuildRowGridCard(AutoTranslateViewModel vm)
+    {
+        var contextMenu = new MenuFlyout
+        {
+            Items =
+            {
+                new MenuItem
+                {
+                    Header = Se.Language.General.TranslateRow,
+                    Command = vm.TranslateRowCommand,
+                },
+            }
+        };
+
+        var tableView = TableViewExtras.MakeTableView();
+        tableView.Height = double.NaN;
+        tableView.ContextFlyout = contextMenu;
+        tableView.DataContext = vm;
+
+        // The DataGrid sized the number and show columns to content (Auto); TableView
+        // treats Auto as star, so they get fixed widths instead.
+        tableView.Columns.Add(new SeTableViewColumn
+        {
+            Header = Se.Language.General.NumberSymbol,
+            Binding = new Binding(nameof(TranslateRow.Number)),
+            Width = new GridLength(60),
+            CellTheme = UiUtil.TableViewCellTheme,
+            HeaderTheme = UiUtil.TableViewColumnHeaderTheme,
+        });
+        tableView.Columns.Add(new SeTableViewColumn
+        {
+            Header = Se.Language.General.Show,
+            Binding = new Binding(nameof(TranslateRow.Show)),
+            Width = new GridLength(110),
+            CellTheme = UiUtil.TableViewCellTheme,
+            HeaderTheme = UiUtil.TableViewColumnHeaderTheme,
+        });
+        tableView.Columns.Add(new SeTableViewColumn
+        {
+            Header = Se.Language.General.Duration,
+            Binding = new Binding(nameof(TranslateRow.Duration)),
+            Width = new GridLength(80),
+            CellTheme = UiUtil.TableViewCellTheme,
+            HeaderTheme = UiUtil.TableViewColumnHeaderTheme,
+        });
+        tableView.Columns.Add(new SeTableViewColumn
+        {
+            Header = Se.Language.General.Text,
+            CellTemplate = TableViewExtras.MakeTextCellTemplate(nameof(TranslateRow.Text)),
+            Width = new GridLength(1, GridUnitType.Star),
+            CellTheme = UiUtil.TableViewCellTheme,
+            HeaderTheme = UiUtil.TableViewColumnHeaderTheme,
+        });
+        tableView.Columns.Add(new SeTableViewColumn
+        {
+            Header = Se.Language.General.Translation,
+            // Editable in place: a click on the selected row's translation opens a TextBox, so a
+            // slip in the machine translation is fixed here instead of after closing the window.
+            // The display stays a binding, so rows keep updating while a translation runs; editing
+            // is gated to when no translation is running, as the engine writes TranslatedText then.
+            CellTemplate = new FuncDataTemplate<TranslateRow>((row, _nameScope) =>
+            {
+                if (row == null)
+                {
+                    return new Border();
+                }
+
+                var cell = new Border { Background = Brushes.Transparent };
+                _ = new TableViewInlineTextEditor(cell, tableView,
+                    () => row.TranslatedText,
+                    text =>
+                    {
+                        row.TranslatedText = text;
+                        vm.HasTranslatedSomething = true; // an edited translation is something to keep - enables OK
+                    },
+                    () => TableViewExtras.MakeTextCellTemplate(nameof(TranslateRow.TranslatedText)).Build(row)!,
+                    canEdit: () => vm.IsTranslateEnabled,
+                    hint: Se.Language.Translate.EditTranslationHint);
+                return cell;
+            }),
+            Width = new GridLength(1, GridUnitType.Star),
+            CellTheme = UiUtil.TableViewCellTheme,
+            HeaderTheme = UiUtil.TableViewColumnHeaderTheme,
+        });
+
+        tableView.Bind(TableView.ItemsSourceProperty, new Binding(nameof(vm.Rows)));
+        tableView.Bind(TableView.SelectedItemProperty, new Binding(nameof(vm.SelectedTranslateRow)));
+        UiUtil.AttachMacContextFlyoutHandler(tableView);
+        tableView.WithAccessibleName(Se.Language.General.Lines);
+        vm.RowGrid = tableView;
+
+        var tableViewBorder = UiUtil.MakeBorderForControlNoPadding(tableView);
+        return MakeCard(tableViewBorder, new Thickness(1));
+    }
+
+    private Control BuildFooter(AutoTranslateViewModel vm)
+    {
+        var progressBar = new ProgressBar
+        {
+            Minimum = 0,
+            Maximum = 100,
+            Height = 6,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Center,
+            CornerRadius = new CornerRadius(3),
+        };
+        progressBar.Bind(ProgressBar.ValueProperty, new Binding(nameof(vm.ProgressValue)));
+        progressBar.Bind(ProgressBar.IsVisibleProperty, new Binding(nameof(vm.IsProgressEnabled)));
+        progressBar.WithAccessibleName(Se.Language.General.Translation);
+
+        var progressLabel = new TextBlock
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(10, 0, 0, 0),
+            MinWidth = 50,
+            Foreground = UiUtil.GetTextColor(0.75),
+        };
+        progressLabel.Bind(TextBlock.TextProperty, new Binding(nameof(vm.ProgressText)));
+        progressLabel.Bind(TextBlock.IsVisibleProperty, new Binding(nameof(vm.IsProgressEnabled)));
+
+        var progressGrid = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            Margin = new Thickness(0, 0, 0, 10),
+            MinHeight = 8,
+        };
+        progressGrid.Children.Add(progressBar);
+        Grid.SetColumn(progressBar, 0);
+        progressGrid.Children.Add(progressLabel);
+        Grid.SetColumn(progressLabel, 1);
+
+        _buttonTranslate = UiUtil.MakeButton(Se.Language.General.Translate, vm.TranslateCommand);
+        _buttonTranslate.Bind(Button.IsEnabledProperty, new Binding(nameof(vm.IsTranslateEnabled)));
+
+        _buttonOk = UiUtil.MakeButtonOk(vm.OkCommand);
+        _buttonOk.Bind(Button.IsEnabledProperty, new Binding(nameof(vm.IsOkEnabled)));
+
+        var buttonCancel = UiUtil.MakeButtonCancel(vm.CancelCommand);
+
+        var buttonBar = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center,
+            Spacing = 8,
+            Children =
+            {
+                _buttonTranslate,
+                buttonCancel,
+                _buttonOk,
+            }
+        };
+
+        var checkBoxTranslateInPlace = UiUtil.MakeCheckBox(Se.Language.Translate.TranslateInPlaceNoOriginal, vm, nameof(vm.TranslateInPlace));
+        checkBoxTranslateInPlace.VerticalAlignment = VerticalAlignment.Center;
+        checkBoxTranslateInPlace.Bind(CheckBox.IsVisibleProperty, new Binding(nameof(vm.TranslateInPlaceIsVisible)));
+
+        var footerGrid = new Grid
+        {
+            RowDefinitions = new RowDefinitions("Auto,Auto"),
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+        };
+        footerGrid.Children.Add(progressGrid);
+        Grid.SetRow(progressGrid, 0);
+        Grid.SetColumnSpan(progressGrid, 2);
+        footerGrid.Children.Add(checkBoxTranslateInPlace);
+        Grid.SetRow(checkBoxTranslateInPlace, 1);
+        footerGrid.Children.Add(buttonBar);
+        Grid.SetRow(buttonBar, 1);
+        Grid.SetColumn(buttonBar, 1);
+
+        return footerGrid;
+    }
+
+    private static Border MakeCard(Control child, Thickness? padding = null)
+    {
+        return new Border
+        {
+            Child = child,
+            BorderThickness = new Thickness(1),
+            BorderBrush = UiUtil.GetTextColor(0.18),
+            Background = UiUtil.GetTextColor(0.04),
+            Padding = padding ?? new Thickness(14, 12),
+            CornerRadius = new CornerRadius(8),
+        };
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        _vm.KeyDown(e);
+    }
+
+    protected override void OnLoaded(RoutedEventArgs e)
+    {
+        base.OnLoaded(e);
+        _vm.OnLoaded();
+    }
+
+    protected override void OnClosing(WindowClosingEventArgs e)
+    {
+        base.OnClosing(e);
+
+        if (DataContext is AutoTranslateViewModel vm)
+        {
+            vm.OnClosing();
+            vm.SaveSettings();
+            vm.PropertyChanged -= OnViewModelPropertyChanged;
+        }
+
+        UiUtil.SaveWindowPosition(this);
+    }
+}

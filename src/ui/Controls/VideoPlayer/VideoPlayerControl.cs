@@ -1,0 +1,1453 @@
+﻿using Avalonia;
+using Avalonia.Automation;
+using Avalonia.Controls;
+using Avalonia.Controls.Presenters;
+using Avalonia.Controls.Primitives;
+using Avalonia.Data;
+using Avalonia.Input;
+using Avalonia.Interactivity;
+using Avalonia.Layout;
+using Avalonia.Media;
+using Avalonia.Threading;
+using Nikse.SubtitleEdit.Core.Common;
+using Nikse.SubtitleEdit.Logic;
+using Nikse.SubtitleEdit.Logic.Config;
+using Nikse.SubtitleEdit.Logic.VideoPlayers;
+using Nikse.SubtitleEdit.Logic.VideoPlayers.LibMpvDynamic;
+using Optris.Icons.Avalonia;
+using System;
+using System.Diagnostics;
+using System.Threading.Tasks;
+using System.Windows.Input;
+
+namespace Nikse.SubtitleEdit.Controls.VideoPlayer
+{
+    public class VideoPlayerControl : UserControl
+    {
+        public static readonly StyledProperty<Control?> PlayerContentProperty =
+            AvaloniaProperty.Register<VideoPlayerControl, Control?>(nameof(PlayerContent));
+
+        public static readonly StyledProperty<double> VolumeProperty =
+            AvaloniaProperty.Register<VideoPlayerControl, double>(nameof(Volume), 100);
+
+        /// <summary>
+        /// Video position in seconds.
+        /// </summary>
+        public static readonly StyledProperty<double> PositionProperty =
+            AvaloniaProperty.Register<VideoPlayerControl, double>(nameof(Position));
+
+        public static readonly StyledProperty<double> DurationProperty =
+            AvaloniaProperty.Register<VideoPlayerControl, double>(nameof(Duration));
+
+        public static readonly StyledProperty<string> ProgressTextProperty =
+            AvaloniaProperty.Register<VideoPlayerControl, string>(nameof(ProgressText), default!);
+
+        public static readonly StyledProperty<ICommand> PlayCommandProperty =
+            AvaloniaProperty.Register<VideoPlayerControl, ICommand>(nameof(PlayCommand));
+
+        public static readonly StyledProperty<ICommand> StopCommandProperty =
+            AvaloniaProperty.Register<VideoPlayerControl, ICommand>(nameof(StopCommand));
+
+        public static readonly StyledProperty<ICommand> FullScreenCommandProperty =
+            AvaloniaProperty.Register<VideoPlayerControl, ICommand>(nameof(FullScreenCommand));
+
+        public static readonly StyledProperty<bool> StopIsVisibleProperty =
+            AvaloniaProperty.Register<VideoPlayerControl, bool>(nameof(StopIsVisible));
+
+        public static readonly StyledProperty<bool> FullScreenIsVisibleProperty =
+            AvaloniaProperty.Register<VideoPlayerControl, bool>(nameof(FullScreenIsVisible));
+
+        public Control? PlayerContent
+        {
+            get => GetValue(PlayerContentProperty);
+            set => SetValue(PlayerContentProperty, value);
+        }
+
+        public double Volume
+        {
+            get => GetValue(VolumeProperty);
+            set
+            {
+                if (value < 0)
+                {
+                    value = 0;
+                }
+                else if (value > _videoPlayerInstance.VolumeMaximum)
+                {
+                    value = _videoPlayerInstance.VolumeMaximum;
+                }
+
+                SetValue(VolumeProperty, value);
+                _videoPlayerInstance.Volume = value;
+            }
+        }
+
+        /// <summary>
+        /// Video position in seconds.
+        /// </summary>
+        public double Position
+        {
+            get => GetValue(PositionProperty);
+            set => SetValue(PositionProperty, value);
+        }
+
+        public double Duration
+        {
+            get => GetValue(DurationProperty);
+            set => SetValue(DurationProperty, value);
+        }
+
+        public string ProgressText
+        {
+            get => GetValue(ProgressTextProperty);
+            set => SetValue(ProgressTextProperty, value);
+        }
+
+        private readonly TextBlock _textBlockVideoFileName;
+        private readonly TextBlock _textBlockPlayerName;
+        private readonly TextBlock _textBlockProgress;
+
+        public ICommand PlayCommand
+        {
+            get => GetValue(PlayCommandProperty);
+            set => SetValue(PlayCommandProperty, value);
+        }
+
+        public ICommand StopCommand
+        {
+            get => GetValue(StopCommandProperty);
+            set => SetValue(StopCommandProperty, value);
+        }
+
+        public ICommand FullScreenCommand
+        {
+            get => GetValue(FullScreenCommandProperty);
+            set => SetValue(FullScreenCommandProperty, value);
+        }
+
+        public bool StopIsVisible
+        {
+            get => GetValue(StopIsVisibleProperty);
+            set => SetValue(StopIsVisibleProperty, value);
+        }
+
+        public bool FullScreenIsVisible
+        {
+            get => GetValue(FullScreenIsVisibleProperty);
+            set => SetValue(FullScreenIsVisibleProperty, value);
+        }
+
+        private bool _isFullScreen = false;
+
+        public event Action<bool>? IsFullScreenChanged;
+
+        public bool IsFullScreen
+        {
+            get => _isFullScreen;
+            set
+            {
+                if (_isFullScreen == value)
+                {
+                    return;
+                }
+
+                _buttonFullScreenCollapse.IsVisible = value;
+                _buttonFullScreen.IsVisible = !value;
+                _isFullScreen = value;
+
+                // Start or stop the auto-hide mechanism based on full screen state
+                if (value)
+                {
+                    StartAutoHideControls();
+                }
+                else
+                {
+                    StopAutoHideControls();
+                    ShowControls();
+                }
+
+                IsFullScreenChanged?.Invoke(value);
+            }
+        }
+
+        public bool IsPlaying => _videoPlayerInstance.IsPlaying;
+
+        public IVideoPlayer VideoPlayer => _videoPlayerInstance;
+        public bool VideoPlayerDisplayTimeLeft { get; set; }
+
+        double _positionIgnore = -1;
+        double _volumeIgnore = -1;
+        private readonly Button _buttonPlay;
+        private readonly Button _buttonFullScreen;
+        private readonly Button _buttonFullScreenCollapse;
+        private readonly Icon _iconVolume;
+        private UiTickPump? _positionTimer; // posted ticks, not a DispatcherTimer - see UiTickPump
+        private int _slowPollCounter;
+        private IVideoPlayer _videoPlayerInstance;
+        private string _videoFileName;
+        private readonly Grid _gridProgress; // Reference to the controls grid
+        private DispatcherTimer? _autoHideTimer;
+        private DateTime _lastActivityTime;
+
+        // True while the user is dragging (or arrow-keying) the position slider. The position
+        // timer must leave the slider alone for as long as it is set - see StartPositionTimer.
+        private bool _isUserMovingPositionSlider;
+        private ContentPresenter? _contentPresenter;
+
+        // Where an in-flight open+restore sequence is heading. See PositionForRestore.
+        private double? _pendingRestorePositionSeconds;
+
+        // How close the player has to be to the restore target to count as arrived. Same value
+        // for the arrival check in the position tick and for EndPositionRestoreIfArrived.
+        private const double PositionRestoreArrivedToleranceSeconds = 0.5;
+
+        /// <summary>
+        /// The position another player should be handed when this control is thrown away and
+        /// rebuilt (layout rebuild, dock/undock, fullscreen) - the pending restore target while
+        /// an open+restore sequence is still in flight, and the live <see cref="Position"/>
+        /// otherwise.
+        /// <para>
+        /// Never sample <see cref="Position"/> for that: <see cref="Open"/> zeroes the position
+        /// display before loading, and a freshly created player reports 0 until its core is up
+        /// and playback has restarted, so anything reading the live position during that window
+        /// (half a second plus the load, easily seconds on a big file) carries 0 forward and
+        /// rewinds the video to the start. Settings -> Apply -> OK does exactly that: Apply
+        /// rebuilds the player and OK rebuilds it again while the first restore is still
+        /// running (issue #14218).
+        /// </para>
+        /// </summary>
+        internal double PositionForRestore => _pendingRestorePositionSeconds ?? Position;
+
+        // When the pending restore was announced (Stopwatch ticks), and whether the sequence that
+        // announced it is still trying to get there. See PositionRestoreHoldSeconds.
+        private long _pendingRestoreStartedTs;
+        private bool _positionRestoreInFlight;
+
+        // An open+restore sequence is a bounded ready wait plus a bounded run of seeks (8 s at the
+        // defaults); past this the player is not going to arrive and the hold must let go.
+        private const double PositionRestoreHoldMaxSeconds = 10;
+
+        /// <summary>
+        /// Where the play-head should be shown while an open+restore sequence is still in flight,
+        /// or null when the live position is the truth. A player that is still loading reports 0,
+        /// and anything that follows the live position through that window - the waveform cursor,
+        /// the centered waveform scroll, "select current subtitle" - jumps to the start of the
+        /// video and back on every layout rebuild, dock/undock and fullscreen (issue #15027).
+        /// <para>
+        /// Unlike <see cref="PositionForRestore"/>, which deliberately keeps its target after a
+        /// restore that ran out of time, this lets go then - and after a hard cap for a sequence
+        /// nothing ever ended: a display held on a target the player never reaches would sit
+        /// frozen through playback.
+        /// </para>
+        /// </summary>
+        internal double? PositionRestoreHoldSeconds
+        {
+            get
+            {
+                if (!_positionRestoreInFlight || IsDisposed || _pendingRestorePositionSeconds is not { } pending)
+                {
+                    return null;
+                }
+
+                var elapsedSeconds = (Stopwatch.GetTimestamp() - _pendingRestoreStartedTs) / (double)Stopwatch.Frequency;
+                if (elapsedSeconds > PositionRestoreHoldMaxSeconds)
+                {
+                    _positionRestoreInFlight = false;
+                    return null;
+                }
+
+                return pending;
+            }
+        }
+
+        /// <summary>
+        /// Announces that an open+restore sequence heading for <paramref name="seconds"/> has
+        /// started, so <see cref="PositionForRestore"/> reports that target instead of the 0 the
+        /// not-yet-loaded player reports. <see cref="Open"/> calls this itself when given a start
+        /// position; callers that seek only after the open (the layout rebuild) call it first.
+        /// The pending value is dropped by <see cref="EndPositionRestore"/> /
+        /// <see cref="EndPositionRestoreIfArrived"/> and, as a safety net for restores that are
+        /// abandoned without one, as soon as the player actually reports the restored position.
+        /// </summary>
+        internal void BeginPositionRestore(double seconds)
+        {
+            if (seconds > 0)
+            {
+                _pendingRestorePositionSeconds = seconds;
+                _pendingRestoreStartedTs = Stopwatch.GetTimestamp();
+                _positionRestoreInFlight = true;
+            }
+        }
+
+        /// <summary>
+        /// Ends the restore announced by <see cref="BeginPositionRestore"/>: the player is where
+        /// it should be, so <see cref="PositionForRestore"/> follows the live position again.
+        /// </summary>
+        internal void EndPositionRestore()
+        {
+            _pendingRestorePositionSeconds = null;
+            _positionRestoreInFlight = false;
+        }
+
+        /// <summary>
+        /// Ends the restore announced by <see cref="BeginPositionRestore"/> only if the player
+        /// has actually arrived there. A restore sequence runs a fixed number of seeks after a
+        /// bounded ready wait, so it can run out while mpv is still loading (a big file, a busy
+        /// machine) - and ending the restore there hands <see cref="PositionForRestore"/> back to
+        /// a player that is still reporting 0, which is exactly the rewind
+        /// <see cref="BeginPositionRestore"/> exists to prevent (issue #14218). Keeping the target
+        /// in that case costs nothing: the position tick drops it the moment the player does
+        /// land, and until then the target is a far better answer for a rebuild than the 0 of a
+        /// player that never got where it was told to go.
+        /// </summary>
+        internal void EndPositionRestoreIfArrived()
+        {
+            // A torn-down player throws rather than reporting a position, and it has nothing left
+            // to say about where the video is anyway - leave the target alone (issue #13083).
+            if (IsDisposed)
+            {
+                return;
+            }
+
+            if (_pendingRestorePositionSeconds is { } pending &&
+                Math.Abs(_videoPlayerInstance.Position - pending) < PositionRestoreArrivedToleranceSeconds)
+            {
+                EndPositionRestore();
+            }
+        }
+
+        /// <summary>
+        /// A seek issued while an open+restore sequence is still in flight moves where the user
+        /// wants to be, so the pending target follows it. Dropping the target instead would
+        /// reopen the issue #14218 rewind (a still-loading player reports 0); keeping the old
+        /// one would make the next rebuild jump back to a spot the user has already left. The
+        /// restore sequence's own seeks re-announce the unchanged target, and the position tick
+        /// still ends the restore once the player lands near the (re)target.
+        /// </summary>
+        private void RetargetPositionRestore(double seconds)
+        {
+            if (_pendingRestorePositionSeconds != null)
+            {
+                _pendingRestorePositionSeconds = seconds;
+            }
+        }
+
+        private void NotifyPositionChanged(double newPosition)
+        {
+            if (Math.Abs(_positionIgnore - newPosition) < 0.001)
+            {
+                return;
+            }
+
+            // Only a control that knows its duration reports trustworthy values here: until it is
+            // published, the bound position slider clamps every write, so this fires with the
+            // clamped echo of the restore sequence's own seeks - retargeting on that would hand
+            // the pending target the near-0 the guard exists to keep out (issue #14218).
+            if (Duration > 0)
+            {
+                RetargetPositionRestore(newPosition);
+            }
+
+            // First update our property
+            Position = newPosition;
+
+            _videoPlayerInstance.Position = UiToPlayerSeconds(newPosition);
+
+            // Then notify listeners like the ViewModel
+            PositionChanged?.Invoke(newPosition);
+        }
+
+        /// <summary>
+        /// UI position values (the <see cref="Position"/> property, the sliders, the waveform
+        /// time axis) run on the SMPTE drop-frame clock while <see cref="IsSmpteTimingEnabled"/>:
+        /// every read from the player is compressed by 1000/1001 (the position timer below, the
+        /// view model's playhead estimator, the waveform peaks). A seek must expand the UI value
+        /// back to the player's real clock, or every seek lands 0.1% early - proportional to the
+        /// absolute position, about a second per 17 minutes - and the playhead pin, whose arrive
+        /// check compares in UI space, then snaps the cursor back once its timeout expires.
+        /// </summary>
+        private double UiToPlayerSeconds(double seconds)
+        {
+            return IsSmpteTimingEnabled ? seconds * 1001.0 / 1000.0 : seconds;
+        }
+
+        public void SetPosition(double seconds)
+        {
+            Position = seconds;
+        }
+
+        /// <summary>
+        /// Lets external position sliders that are bound to <see cref="Position"/> (the
+        /// waveform toolbar's) join the same mid-drag gate as this control's own slider:
+        /// while set, the position timer leaves <see cref="Position"/> alone, so the timer
+        /// can't yank the dragged thumb back to mpv's not-yet-seeked position (issue #13910
+        /// - fixing only the built-in slider left the toolbar slider fighting the timer).
+        /// </summary>
+        public void SetUserMovingPositionSlider(bool moving)
+        {
+            _isUserMovingPositionSlider = moving;
+        }
+
+        public void SetPositionDisplayOnly(double seconds)
+        {
+            _positionIgnore = seconds;
+            Position = seconds;
+        }
+
+        /// <summary>
+        /// Seeks the player and moves the position display with it. Prefer this over assigning
+        /// <see cref="Position"/> when the seek must happen: the styled property drops an
+        /// assignment equal to the value it already holds, so a caller landing on the spot the
+        /// display happens to show (a frame step parking back where the last tick reported)
+        /// would silently never reach the player.
+        /// </summary>
+        public void SeekTo(double seconds)
+        {
+            RetargetPositionRestore(seconds);
+            SetPositionDisplayOnly(seconds);
+            _videoPlayerInstance.Position = UiToPlayerSeconds(seconds);
+        }
+
+        public int ContentWidth => _contentPresenter?.Bounds.Width > 0 ? (int)_contentPresenter.Bounds.Width : 0;
+        public int ContentHeight => _contentPresenter?.Bounds.Height > 0 ? (int)_contentPresenter.Bounds.Height : 0;
+
+        public VideoPlayerControl(IVideoPlayer videoPlayerInstance)
+        {
+            // A right to left UI language sets the whole window to RightToLeft, which
+            // mirrors every visual, including this video surface (the picture and any
+            // overlay would render flipped). Pin the player to left to right so the
+            // video is never mirrored regardless of the UI language.
+            FlowDirection = Avalonia.Media.FlowDirection.LeftToRight;
+
+            _videoPlayerInstance = videoPlayerInstance;
+            _videoFileName = string.Empty;
+            _lastActivityTime = DateTime.UtcNow;
+
+            var mainGrid = new Grid
+            {
+                RowDefinitions = new RowDefinitions("*,Auto"), // video + controls
+                Background = Brushes.Transparent // Enable hit testing for pointer events
+            };
+
+            // PlayerContent
+            var contentPresenter = new ContentPresenter
+            {
+                [!ContentPresenter.ContentProperty] = this[!PlayerContentProperty],
+                Background = new SolidColorBrush(Colors.Black),
+            };
+            _contentPresenter = contentPresenter;
+            mainGrid.Children.Add(contentPresenter);
+            Grid.SetRow(contentPresenter, 0);
+
+            // Row with buttons + position slider + volume slider
+            _gridProgress = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto"),
+                Margin = new Thickness(10, 4)
+            };
+            Grid.SetRow(_gridProgress, 1);
+            mainGrid.Children.Add(_gridProgress);
+
+            // Attach a tunnel handler so we see clicks even if child handles them.
+            mainGrid.AddHandler(InputElement.PointerPressedEvent, OnMainGridPointerPressed, RoutingStrategies.Tunnel, handledEventsToo: true);
+            // Release handler is on `this` (not mainGrid) so it still fires when the pointer
+            // is captured to this control — routing wouldn't reach mainGrid in that case.
+            this.AddHandler(InputElement.PointerReleasedEvent, OnMainGridPointerReleased, RoutingStrategies.Tunnel | RoutingStrategies.Bubble, handledEventsToo: true);
+            // Scrub the video by scrolling the mouse wheel over the video surface (issue #11080).
+            this.AddHandler(InputElement.PointerWheelChangedEvent, OnVideoWheelChanged, RoutingStrategies.Bubble, handledEventsToo: true);
+
+            // Buttons
+            var stackPanel = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            // Play
+            // NonSpaceButton: a focused Button would otherwise consume/duplicate the global
+            // play/pause Space shortcut once clicked with the mouse (issue #12759).
+            _buttonPlay = new NonSpaceButton
+            {
+                Margin = new Thickness(0, 0, 3, 0),
+                [AutomationProperties.NameProperty] = Se.Language.General.Play,
+            };
+            Attached.SetIcon(_buttonPlay, "fa-solid fa-play");
+            _buttonPlay.Click += (_, _) =>
+            {
+                var wasPlaying = _videoPlayerInstance.IsPlaying;
+                PlayPauseRequested?.Invoke(wasPlaying);
+                _videoPlayerInstance.PlayOrPause();
+            };
+            _buttonPlay.Bind(Button.CommandProperty, new Binding
+            {
+                Path = nameof(PlayCommand),
+                Source = this
+            });
+            if (Se.Settings.Appearance.ShowHints)
+            {
+                ToolTip.SetTip(_buttonPlay, Se.Language.General.Play);
+            }
+
+            stackPanel.Children.Add(_buttonPlay);
+
+            // Stop
+            var buttonStop = new NonSpaceButton
+            {
+                Margin = new Thickness(0, 0, 3, 0),
+                [AutomationProperties.NameProperty] = Se.Language.General.Stop,
+            };
+            buttonStop.Bind(Button.IsVisibleProperty, new Binding
+            {
+                Path = nameof(StopIsVisible),
+                Source = this
+            });
+            Attached.SetIcon(buttonStop, "fa-solid fa-stop");
+            buttonStop.Click += (_, _) =>
+            {
+                _videoPlayerInstance.Stop();
+                StopRequested?.Invoke();
+            };
+            if (Se.Settings.Appearance.ShowHints)
+            {
+                ToolTip.SetTip(buttonStop, Se.Language.General.Stop);
+            }
+            stackPanel.Children.Add(buttonStop);
+            buttonStop.Bind(Button.CommandProperty, new Binding
+            {
+                Path = nameof(StopCommand),
+                Source = this
+            });
+
+            // Fullscreen
+            _buttonFullScreen = new NonSpaceButton
+            {
+                Margin = new Thickness(0, 0, 3, 0),
+                [AutomationProperties.NameProperty] = Se.Language.General.FullScreen,
+            };
+            _buttonFullScreen.Bind(IsVisibleProperty, new Binding
+            {
+                Path = nameof(FullScreenIsVisible),
+                Source = this
+            });
+            Attached.SetIcon(_buttonFullScreen, "fa-solid fa-expand");
+            _buttonFullScreen.Click += (_, _) => FullscreenRequested?.Invoke();
+            if (Se.Settings.Appearance.ShowHints)
+            {
+                ToolTip.SetTip(_buttonFullScreen, Se.Language.General.FullScreen);
+            }
+            stackPanel.Children.Add(_buttonFullScreen);
+            _buttonFullScreen.Bind(Button.CommandProperty, new Binding
+            {
+                Path = nameof(FullScreenCommand),
+                Source = this
+            });
+
+
+            _buttonFullScreenCollapse = new NonSpaceButton()
+            {
+                Margin = new Thickness(0, 0, 3, 0),
+                IsVisible = false,
+                [AutomationProperties.NameProperty] = Se.Language.General.ExitFullScreen,
+            };
+            Attached.SetIcon(_buttonFullScreenCollapse, "fa-solid fa-compress");
+            _buttonFullScreenCollapse.Click += (_, _) => FullscreenCollapseRequested?.Invoke();
+            if (Se.Settings.Appearance.ShowHints)
+            {
+                ToolTip.SetTip(_buttonFullScreenCollapse, Se.Language.General.ExitFullScreen);
+            }
+            stackPanel.Children.Add(_buttonFullScreenCollapse);
+
+            _gridProgress.Children.Add(stackPanel);
+            Grid.SetColumn(stackPanel, 0);
+
+            var sliderPosition = new Slider
+            {
+                Minimum = 0,
+                Margin = new Thickness(2, 0, 0, 0),
+                [AutomationProperties.NameProperty] = Se.Language.General.VideoPosition,
+            };
+            if (Se.Settings.Appearance.ShowHints)
+            {
+                ToolTip.SetTip(sliderPosition, Se.Language.General.VideoPosition);
+
+                // Show the hovered timestamp in the tooltip (frame/HH:MM:SS:FF vs ms format
+                // is already handled by ToDisplayString via UseTimeFormatHHMMSSFF).
+                // Avalonia's Slider centers the thumb on the value point, so the effective
+                // value-range track is narrower than the slider by one thumb width — we have
+                // to match that mapping or the hint reads later than the actual click target.
+                const double thumbWidth = 14.0;
+                sliderPosition.AddHandler(PointerMovedEvent, (_, e) =>
+                {
+                    var available = sliderPosition.Bounds.Width - thumbWidth;
+                    if (available <= 0 || Duration <= 0)
+                    {
+                        return;
+                    }
+
+                    var x = e.GetPosition(sliderPosition).X - thumbWidth / 2;
+                    var ratio = Math.Clamp(x / available, 0.0, 1.0);
+                    var hovered = sliderPosition.Minimum + ratio * (sliderPosition.Maximum - sliderPosition.Minimum);
+                    var offsetSec = Se.Settings.General.CurrentVideoOffsetInMs / 1000.0;
+                    ToolTip.SetTip(sliderPosition, TimeCode.FromSeconds(hovered + offsetSec).ToDisplayString());
+                });
+            }
+            sliderPosition.TemplateApplied += (s, e) =>
+            {
+                if (e.NameScope.Find<Thumb>("thumb") is Thumb thumb)
+                {
+                    thumb.Width = 14;
+                    thumb.Height = 14;
+                }
+            };
+
+            sliderPosition.Bind(RangeBase.MaximumProperty, this.GetObservable(DurationProperty));
+            sliderPosition.Bind(RangeBase.ValueProperty, this.GetObservable(PositionProperty));
+
+            // Also ensure the control can receive keyboard focus
+            sliderPosition.Focusable = true;
+
+            sliderPosition.AddHandler(PointerPressedEvent, (_, _) => _isUserMovingPositionSlider = true, RoutingStrategies.Tunnel);
+            sliderPosition.AddHandler(PointerReleasedEvent, (_, _) => _isUserMovingPositionSlider = false, RoutingStrategies.Tunnel);
+            sliderPosition.AddHandler(PointerCaptureLostEvent, (_, _) => _isUserMovingPositionSlider = false, RoutingStrategies.Tunnel);
+            sliderPosition.AddHandler(KeyDownEvent, (_, e) =>
+            {
+                if (e.Key is Key.Left or Key.Right or Key.Up or Key.Down or Key.Home or Key.End or Key.PageUp or Key.PageDown)
+                {
+                    _isUserMovingPositionSlider = true;
+                }
+            }, RoutingStrategies.Tunnel);
+            sliderPosition.AddHandler(KeyUpEvent, (_, _) => _isUserMovingPositionSlider = false, RoutingStrategies.Tunnel);
+
+            // For any direct value changes
+            sliderPosition.ValueChanged += (s, e) =>
+            {
+                NotifyPositionChanged(e.NewValue);
+                if (_isUserMovingPositionSlider)
+                {
+                    UserSeeked?.Invoke(e.NewValue);
+                }
+            };
+
+            _gridProgress.Children.Add(sliderPosition);
+            Grid.SetColumn(sliderPosition, 1);
+
+            _iconVolume = new Icon
+            {
+                Value = "fa-solid fa-volume-up",
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(10, 0, 4, 0)
+            };
+            _gridProgress.Children.Add(_iconVolume);
+            Grid.SetColumn(_iconVolume, 2);
+
+            var sliderVolume = new Slider
+            {
+                Minimum = 0,
+                Maximum = videoPlayerInstance.VolumeMaximum,
+                Width = 80,
+                VerticalAlignment = VerticalAlignment.Center,
+                Focusable = true,
+                [AutomationProperties.NameProperty] = Se.Language.General.Volume,
+            };
+            if (Se.Settings.Appearance.ShowHints)
+            {
+                ToolTip.SetTip(sliderVolume, Se.Language.General.Volume);
+            }
+            sliderVolume.TemplateApplied += (s, e) =>
+            {
+                if (e.NameScope.Find<Thumb>("thumb") is Thumb thumb)
+                {
+                    thumb.Width = 14;
+                    thumb.Height = 14;
+                }
+            };
+            sliderVolume.Bind(RangeBase.ValueProperty, this.GetObservable(VolumeProperty));
+
+            sliderVolume.ValueChanged += (s, e) =>
+            {
+                if (_volumeIgnore == e.NewValue)
+                {
+                    return;
+                }
+
+                Volume = e.NewValue;
+                _videoPlayerInstance.Volume = e.NewValue;
+                VolumeChanged?.Invoke(e.NewValue);
+                SetVolumeIcon(e.NewValue < 0.0001);
+
+                ToolTip.SetTip(sliderVolume, $"{Se.Language.General.Volume} {sliderVolume.Value:0}%");
+            };
+
+            _gridProgress.Children.Add(sliderVolume);
+            Grid.SetColumn(sliderVolume, 3);
+
+
+            // ProgressText
+            var progressText = new TextBlock
+            {
+                VerticalAlignment = VerticalAlignment.Bottom,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                FontSize = UiUtil.ScaledFontSize(12),
+                FontWeight = FontWeight.Bold,
+                FontFeatures = FontFeatureCollection.Parse("tnum"),
+            };
+            _textBlockProgress = progressText;
+            progressText.Bind(TextBlock.TextProperty, this.GetObservable(ProgressTextProperty));
+            _gridProgress.Children.Add(progressText);
+            Grid.SetColumn(progressText, 1);
+            ProgressText = string.Empty;
+            progressText.PointerPressed += (_, _) => ToggleDisplayProgressTextModeRequested?.Invoke();
+
+            _textBlockPlayerName = new TextBlock
+            {
+                VerticalAlignment = VerticalAlignment.Top,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                FontSize = UiUtil.ScaledFontSize(9),
+                FontWeight = FontWeight.Bold,
+                Opacity = 0.6,
+            };
+            _gridProgress.Children.Add(_textBlockPlayerName);
+            Grid.SetColumn(_textBlockPlayerName, 3);
+
+            _textBlockVideoFileName = new TextBlock
+            {
+                VerticalAlignment = VerticalAlignment.Bottom,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                FontSize = UiUtil.ScaledFontSize(9),
+                FontWeight = FontWeight.Bold,
+                Opacity = 0.6,
+                TextAlignment = TextAlignment.Right,
+                // Trim from the start so the file extension stays visible (e.g. "…movie.mkv").
+                TextTrimming = TextTrimming.PrefixCharacterEllipsis,
+                MaxLines = 1,
+            };
+            _gridProgress.Add(_textBlockVideoFileName, 0, 1, 1, 3);
+            IsFileNameHidden = UiUtil.HideFileNames;
+            _textBlockVideoFileName.PointerPressed += (_, e) => { VideoFileNamePointerPressed?.Invoke(e); };
+
+            // Resize the file-name label with the window: cap its width to the space to the
+            // right of the centered position/duration text so it fills what's available
+            // without overlapping that text. Recompute both when the controls grow/shrink
+            // (window resize) and when the progress text changes size — the latter covers
+            // startup, where the progress text is still empty when the grid is first laid out.
+            _gridProgress.SizeChanged += (_, _) => UpdateVideoFileNameMaxWidth();
+            _textBlockProgress.SizeChanged += (_, _) => UpdateVideoFileNameMaxWidth();
+
+            Content = mainGrid;
+
+            sliderPosition.Maximum = 1;
+            sliderPosition.Value = 0;
+
+            sliderVolume.Maximum = LibMpvDynamicPlayer.MaxVolume;
+            sliderVolume.Value = 50;
+
+            // Attach keyboard event handler to detect keyboard activity
+            this.KeyDown += OnKeyDown;
+        }
+
+        // Raised when the user clicks the video surface (row 0), not the controls row.
+        public event EventHandler<PointerPressedEventArgs>? SurfacePointerPressed;
+
+        // Enable/disable click-to-toggle behavior (default on)
+        public bool ClickToTogglePlay { get; set; } = true;
+        public bool IsSmpteTimingEnabled { get; set; }
+        private bool _surfaceLeftButtonDown;
+
+        private void OnMainGridPointerPressed(object? sender, PointerPressedEventArgs e)
+        {
+            var props = e.GetCurrentPoint(this).Properties;
+            if (props.PointerUpdateKind != PointerUpdateKind.LeftButtonPressed || _surfaceLeftButtonDown)
+            {
+                return;
+            }
+
+            // If the click is inside the controls row (_gridProgress), ignore it
+            var inControls = false;
+            try
+            {
+                var ptInControls = e.GetPosition(_gridProgress);
+                inControls =
+                    ptInControls.X >= 0 && ptInControls.Y >= 0 &&
+                    ptInControls.X <= _gridProgress.Bounds.Width &&
+                    ptInControls.Y <= _gridProgress.Bounds.Height;
+            }
+            catch
+            {
+                // ignore
+            }
+
+            if (inControls)
+            {
+                return;
+            }
+
+            _surfaceLeftButtonDown = true;
+            e.Pointer.Capture(this);
+
+            // This is a click on the video surface
+            SurfacePointerPressed?.Invoke(this, e);
+
+            if (ClickToTogglePlay)
+            {
+                var wasPlaying = _videoPlayerInstance.IsPlaying;
+                PlayPauseRequested?.Invoke(wasPlaying);
+                _videoPlayerInstance.PlayOrPause();
+                e.Handled = true;
+            }
+
+            if (IsFullScreen)
+            {
+                // Consider this user activity for the auto-hide logic
+                OnUserActivity();
+            }
+        }
+
+        private void OnMainGridPointerReleased(object? sender, PointerReleasedEventArgs e)
+        {
+            if (!_surfaceLeftButtonDown)
+            {
+                return;
+            }
+
+            var props = e.GetCurrentPoint(this).Properties;
+            if (!props.IsLeftButtonPressed)
+            {
+                _surfaceLeftButtonDown = false;
+                e.Pointer.Capture(null);
+            }
+        }
+
+        private void OnVideoWheelChanged(object? sender, PointerWheelEventArgs e)
+        {
+            // Ignore wheel events over the controls row (sliders, buttons).
+            try
+            {
+                if (_gridProgress.IsVisible)
+                {
+                    var ptInControls = e.GetPosition(_gridProgress);
+                    if (ptInControls.X >= 0 && ptInControls.Y >= 0 &&
+                        ptInControls.X <= _gridProgress.Bounds.Width &&
+                        ptInControls.Y <= _gridProgress.Bounds.Height)
+                    {
+                        return;
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            var delta = e.Delta.Y;
+            if (Math.Abs(delta) < 0.1 && Math.Abs(e.Delta.X) > 0.1)
+            {
+                delta = e.Delta.X;
+            }
+
+            if (Math.Abs(delta) < 0.0001)
+            {
+                return;
+            }
+
+            if (Se.Settings.Waveform.InvertMouseWheel)
+            {
+                delta = -delta;
+            }
+
+            const double stepSeconds = 0.5;
+            var newPosition = Position + delta * stepSeconds;
+
+            var duration = Duration;
+            if (newPosition < 0)
+            {
+                newPosition = 0;
+            }
+            else if (duration > 0 && newPosition > duration)
+            {
+                newPosition = duration;
+            }
+
+            // Wheeling past either end while already parked there clamps back onto the current
+            // position: there is nothing to seek (NotifyPositionChanged would drop it anyway), so
+            // don't raise UserSeeked either. Its playhead pin waits for the player to confirm a
+            // seek, and with no seek sent that only ends at the pin's 5 s cap - the cursor stayed
+            // stuck through the start of playback (issue #14894).
+            if (Math.Abs(newPosition - Position) >= 0.001)
+            {
+                NotifyPositionChanged(newPosition);
+                UserSeeked?.Invoke(newPosition);
+            }
+
+            if (IsFullScreen)
+            {
+                OnUserActivity();
+            }
+
+            e.Handled = true;
+        }
+
+        /// <summary>
+        /// Raised when the user toggles playback via this control (toolbar button, click on the
+        /// video surface or <see cref="TogglePlayPause"/>). The argument is true when playback was
+        /// running, i.e. the request pauses. Raised before the toggle is sent to the player: the
+        /// player's IsPlaying lags the pause command (~100 ms for mpv), so owners react on the
+        /// request itself — e.g. freeze the interpolated waveform cursor (issue #12233) — and a
+        /// resume handler may reposition the paused player onto the drawn cursor, which must reach
+        /// the player before the play command so no audio from the old spot escapes first.
+        /// </summary>
+        public event Action<bool>? PlayPauseRequested;
+        public event Action? StopRequested;
+        public event Action? FullscreenRequested;
+        public event Action? FullscreenCollapseRequested;
+        public event Action<double>? PositionChanged;
+        public event Action<double>? UserSeeked;
+        public event Action<double>? VolumeChanged;
+        public event Action? ToggleDisplayProgressTextModeRequested;
+        public event Action<PointerPressedEventArgs>? VideoFileNamePointerPressed;
+
+        public void SetPlayPauseIcon(bool isPlaying)
+        {
+            if (isPlaying)
+            {
+                Attached.SetIcon(_buttonPlay, "fa-solid fa-pause");
+                AutomationProperties.SetName(_buttonPlay, Se.Language.General.Pause);
+                if (Se.Settings.Appearance.ShowHints)
+                {
+                    ToolTip.SetTip(_buttonPlay, Se.Language.General.Pause);
+                }
+            }
+            else
+            {
+                Attached.SetIcon(_buttonPlay, "fa-solid fa-play");
+                AutomationProperties.SetName(_buttonPlay, Se.Language.General.Play);
+                if (Se.Settings.Appearance.ShowHints)
+                {
+                    ToolTip.SetTip(_buttonPlay, Se.Language.General.Play);
+                }
+            }
+        }
+
+        public void SetVolumeIcon(bool isMuted)
+        {
+            Dispatcher.UIThread.Invoke(() => { _iconVolume.Value = isMuted ? "fa-solid fa-volume-xmark" : "fa-solid fa-volume-up"; });
+        }
+
+        /// <param name="startPositionSeconds">
+        /// Where the video should already be when it comes up. Callers that restore a position
+        /// (session restore, fullscreen, undock) pass it here instead of seeking afterwards:
+        /// a later seek leaves the player showing 0:00 for a moment and then jumping (#13329).
+        /// </param>
+        internal async Task Open(string videoFileName, double startPositionSeconds = 0)
+        {
+            if (IsDisposed)
+            {
+                return;
+            }
+
+            // From here until the file is up and playback has restarted the position reads 0,
+            // so remember where this open is heading for anything that rebuilds the player
+            // meanwhile (issue #14218). Callers that seek only after the open have already
+            // announced their target - a start-less open must not clear it.
+            BeginPositionRestore(startPositionSeconds);
+
+            // Reset slider state before LoadFile. Otherwise, when the new file's
+            // Duration arrives on the next timer tick, the slider's Maximum drops
+            // and a stale Value (left over from the previous file) gets clamped to
+            // the new Maximum — firing ValueChanged and seeking mpv to EOF.
+            SetPositionDisplayOnly(0);
+            Duration = 0;
+
+            await _videoPlayerInstance.LoadFile(videoFileName, startPositionSeconds);
+
+            // The control may have been torn down while LoadFile was awaiting (fullscreen
+            // closed mid-open, a second layout rebuild). Starting the position timer then
+            // would poll the disposed player from the dispatcher for the rest of the session.
+            if (IsDisposed)
+            {
+                return;
+            }
+
+            _videoPlayerInstance.Volume = Volume;
+            _positionTimer?.Stop();
+            _slowPollCounter = 4; // force Duration+icon update on the very first tick
+            StartPositionTimer();
+            _videoPlayerInstance.Pause();
+            _textBlockPlayerName.Text = _videoPlayerInstance.Name;
+            _videoFileName = videoFileName;
+
+            // Re-arm fullscreen auto-hide. A preceding Close() (e.g. via Ctrl+N
+            // before opening a new file) stops _autoHideTimer, and the IsFullScreen
+            // setter doesn't run a fresh true→true transition — so without this
+            // the controls would stay visible until the user moves the cursor on
+            // the fullscreen monitor.
+            if (IsFullScreen)
+            {
+                StartAutoHideControls();
+            }
+
+            _textBlockVideoFileName.Text = System.IO.Path.GetFileName(videoFileName);
+            UpdateVideoFileNameMaxWidth();
+        }
+
+        /// <summary>
+        /// Blurs the video file name label so it can't be read in a screen recording (#15300).
+        /// </summary>
+        public bool IsFileNameHidden
+        {
+            get => _textBlockVideoFileName.Effect != null;
+            set => _textBlockVideoFileName.Effect = value ? new BlurEffect { Radius = 8 } : null;
+        }
+
+        // Cap the file-name label to the width available to the right of the centered
+        // position/duration text. The label is right-aligned, so this lets it fill the
+        // free space and grow/shrink with the window while its PrefixCharacterEllipsis
+        // trims the start when the name is too long to fit.
+        private void UpdateVideoFileNameMaxWidth()
+        {
+            var gridWidth = _gridProgress.Bounds.Width;
+            if (gridWidth <= 0)
+            {
+                return;
+            }
+
+            // Right edge of the centered progress text (falls back to the grid center
+            // before that text has been laid out).
+            var progressRight = _textBlockProgress.Bounds.Width > 0
+                ? _textBlockProgress.Bounds.Right
+                : gridWidth / 2;
+
+            const double gap = 8;
+            var available = gridWidth - progressRight - gap;
+            _textBlockVideoFileName.MaxWidth = available > 20 ? available : 20;
+        }
+
+        internal void Close()
+        {
+            _positionTimer?.Stop();
+            StopAutoHideControls();
+            _videoPlayerInstance.CloseFile();
+            ProgressText = string.Empty;
+            _videoFileName = string.Empty;
+            _textBlockVideoFileName.Text = string.Empty;
+            SetPositionDisplayOnly(0);
+            Duration = 0;
+        }
+
+        /// <summary>
+        /// Set once <see cref="CloseAndDisposePlayer"/> has started tearing this control down.
+        /// Every async open/restore sequence (Open, WaitForPlayersReadyAsync, the reopen
+        /// continuations in the layout rebuild, fullscreen and Reopen paths) must bail out when
+        /// this is set: a control is disposed from window Closed handlers and layout rebuilds
+        /// while such a sequence may still be awaiting, and without the check the continuation
+        /// keeps polling and seeking the dead player for seconds (issue #13083) - or worse,
+        /// restarts the 50 ms position timer on it, which then P/Invokes the freed core forever.
+        /// </summary>
+        internal bool IsDisposed { get; private set; }
+
+        /// <summary>
+        /// Permanently tears this control down: stops the polling timers, unloads the file,
+        /// detaches the native render host and destroys the underlying player.
+        /// <para>
+        /// Call this - not just <c>VideoPlayer.CloseFile()</c> - whenever a control is thrown
+        /// away (layout rebuild, leaving fullscreen, closing the undocked window). Skipping it
+        /// leaks two things that survive until the app exits: the 50 ms <see cref="_positionTimer"/>,
+        /// which a running <see cref="DispatcherTimer"/> keeps rooted in the dispatcher (so it goes
+        /// on P/Invoking the dead player from the UI thread forever), and the native player core
+        /// itself, whose worker threads and GPU context are only released by its Dispose. Since
+        /// Options/OK rebuilds the layout on any setting change, that used to leak one mpv core
+        /// plus one UI-thread poller per OK, which is what made the waveform playhead stutter
+        /// until restart (issue #13048).
+        /// </para>
+        /// <para>
+        /// Order matters: stop and unload first so the player is idle, then drop the content
+        /// (which destroys the embedded window), and only then destroy the core. mpv's
+        /// <c>mpv_terminate_destroy</c> blocks until every worker has exited - milliseconds when
+        /// idle, but many seconds if a load is stuck on a slow path - so it runs on a worker
+        /// thread rather than freezing the UI (same reasoning as issue #11176).
+        /// </para>
+        /// </summary>
+        internal void CloseAndDisposePlayer()
+        {
+            IsDisposed = true;
+            Close();
+
+            // Mark before the content goes. On the OpenGL host mpv's render context may only be
+            // freed from the GL deinit callback (the GL context has to be current), and dropping
+            // the content is what fires that callback - so it has to already know the player is
+            // being discarded, or it hands back to a Dispose that can no longer free the context.
+            (_videoPlayerInstance as LibMpvDynamicPlayer)?.MarkForDispose();
+
+            Content = null;
+
+            if (_videoPlayerInstance is not IDisposable disposablePlayer)
+            {
+                return;
+            }
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    disposablePlayer.Dispose();
+                }
+                catch (Exception exception)
+                {
+                    Se.LogError(exception, "VideoPlayerControl background player dispose");
+                }
+            });
+        }
+
+        /// <summary>
+        /// Seeks a freshly opened player back to <paramref name="seconds"/> and keeps at it until
+        /// it reports it is actually there, then ends the restore announced by
+        /// <see cref="BeginPositionRestore"/>.
+        /// <para>
+        /// Every rebuild path (layout rebuild, dock/undock, fullscreen) used to do this by hand,
+        /// by assigning <see cref="Position"/> ten times over 100 ms. Both halves of that were
+        /// wrong. The property reaches the player only through the bound position slider, whose
+        /// Maximum is this control's <see cref="Duration"/> - published from the position tick,
+        /// not by <see cref="WaitForPlayersReadyAsync"/>, which waits on the core's duration - so
+        /// a write landing in that gap is clamped and seeks the video to the start instead. And
+        /// once the duration is published the repeats stop happening at all: the property already
+        /// holds the value, so the styled-property layer drops the rest and they never reach the
+        /// slider - a 100 ms budget that is really one seek. mpv swallows seeks while it is still
+        /// loading, which a 43 minute file does for far longer than that, and nothing re-seeked
+        /// afterwards: the video stayed at 0:00 after Options/OK, and the waveform, which follows
+        /// the play-head, sat on the first line of the file (issue #14741).
+        /// </para>
+        /// <para>
+        /// Uses <see cref="SeekTo"/>, which writes the player directly and so is immune to both,
+        /// and gives up only after <paramref name="timeoutMs"/> - keeping the pending target when
+        /// it does, so a rebuild is still handed where the video should be rather than the 0 of a
+        /// player that never got there (issue #14218).
+        /// </para>
+        /// </summary>
+        internal async Task RestorePositionAsync(double seconds, int timeoutMs = 5000)
+        {
+            if (seconds <= 0)
+            {
+                EndPositionRestore();
+                return;
+            }
+
+            var end = Environment.TickCount64 + timeoutMs;
+            var delayMs = 10;
+            while (true)
+            {
+                if (IsDisposed)
+                {
+                    return;
+                }
+
+                SeekTo(seconds);
+                await Task.Delay(delayMs);
+
+                // A control torn down while this was awaiting has nothing left to seek, and its
+                // player throws rather than reporting a position (issue #13083).
+                if (IsDisposed)
+                {
+                    return;
+                }
+
+                if (Math.Abs(_videoPlayerInstance.Position - seconds) < PositionRestoreArrivedToleranceSeconds)
+                {
+                    EndPositionRestore();
+                    return;
+                }
+
+                if (Environment.TickCount64 >= end)
+                {
+                    // The target stays for a rebuild to pick up, but nothing is heading for it
+                    // any more - stop holding the play-head display on it.
+                    _positionRestoreInFlight = false;
+                    return;
+                }
+
+                // Back off: the first few tries cover a player that is merely settling, the
+                // slower ones a file still loading, without polling it flat out for seconds.
+                delayMs = Math.Min(delayMs * 2, 200);
+            }
+        }
+
+        internal async Task WaitForPlayersReadyAsync(int timeoutMs = 2500)
+        {
+            var end = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+            while (DateTime.UtcNow < end)
+            {
+                // A disposed player reports Duration 0 forever, so without this check the
+                // poll always runs to the full timeout against the dead core (issue #13083).
+                if (IsDisposed)
+                {
+                    return;
+                }
+
+                // Consider player ready when Duration is known (> 0)
+                var ready = VideoPlayer.Duration > 0.001;
+
+                if (ready)
+                {
+                    break;
+                }
+
+                await Task.Delay(100);
+            }
+
+            // Small extra delay to ensure seeking is reliable
+            await Task.Delay(200);
+        }
+
+        internal void TogglePlayPause()
+        {
+            var wasPlaying = _videoPlayerInstance.IsPlaying;
+            PlayPauseRequested?.Invoke(wasPlaying);
+            _videoPlayerInstance.PlayOrPause();
+        }
+
+        internal AudioTrackInfo? ToggleAudioTrack()
+        {
+            return _videoPlayerInstance.ToggleAudioTrack();
+        }
+
+        private void StartPositionTimer()
+        {
+            _positionTimer = new UiTickPump(TimeSpan.FromMilliseconds(50));
+            _positionTimer.Tick += (s, e) =>
+            {
+                // Duration and IsPlaying change infrequently — poll every 5th tick (~250 ms)
+                // instead of every 50 ms to reduce P/Invoke overhead on the UI thread.
+                // Polled first so that ProgressText below always uses the current Duration.
+                _slowPollCounter++;
+                if (_slowPollCounter >= 5)
+                {
+                    _slowPollCounter = 0;
+                    Duration = _videoPlayerInstance.Duration;
+                    SetPlayPauseIcon(_videoPlayerInstance.IsPlaying);
+
+                    // The ffmpeg player only knows its decoder (hardware vs. software) once the
+                    // video thread has opened it, and may drop to software mid-playback.
+                    var playerName = _videoPlayerInstance.Name;
+                    if (_textBlockPlayerName.Text != playerName)
+                    {
+                        _textBlockPlayerName.Text = playerName;
+                    }
+                }
+
+                var postFix = IsSmpteTimingEnabled ? " (SMPTE)" : string.Empty;
+                double pos;
+                if (_isUserMovingPositionSlider)
+                {
+                    // While the slider is being dragged its own value is the truth. Writing the
+                    // player position back into Position mid-drag pulls the thumb off the mouse
+                    // until the seek lands, and the next mouse move pulls it forward again -
+                    // the back and forth jumping in issue #13910. It only showed up during
+                    // playback because a paused player reports the seeked-to position right
+                    // away, leaving nothing to fight over.
+                    pos = Position;
+                }
+                else
+                {
+                    pos = _videoPlayerInstance.Position;
+                    if (IsSmpteTimingEnabled)
+                    {
+                        pos = pos * 1000.0 / 1001.0; // SMPTE timing adjustment
+                    }
+
+                    // The player has arrived where the restore was heading - drop the pending
+                    // target even if the restoring code never got to end it (an abandoned
+                    // sequence would otherwise pin PositionForRestore for the rest of the
+                    // control's life). Checked on the player's own position, before the hold
+                    // below replaces it for display.
+                    if (_pendingRestorePositionSeconds is { } pending &&
+                        Math.Abs(pos - pending) < PositionRestoreArrivedToleranceSeconds)
+                    {
+                        EndPositionRestore();
+                    }
+
+                    // Still loading its way back after a rebuild: the player reports 0, which
+                    // showed as the time text and the slider dropping to 0:00 and jumping back
+                    // once the restore seek landed. Show where the video is going to be, like
+                    // the waveform play-head does (issue #15027). Display only - nothing here
+                    // reaches the player.
+                    if (PositionRestoreHoldSeconds is { } holdSeconds)
+                    {
+                        pos = holdSeconds;
+                    }
+
+                    SetPositionDisplayOnly(pos);
+                }
+
+                var fullDuration = TimeCode.FromSeconds(Duration + Se.Settings.General.CurrentVideoOffsetInMs / 1000.0).ToDisplayString();
+                if (VideoPlayerDisplayTimeLeft)
+                {
+                    var left = Duration - pos;
+
+                    if (left > 0.001)
+                    {
+                        ProgressText =
+                            $"-{TimeCode.FromSeconds(left).ToDisplayString()} / {fullDuration}{postFix}";
+                    }
+                    else
+                    {
+                        ProgressText =
+                            $"{TimeCode.FromSeconds(0).ToDisplayString()} / {fullDuration}{postFix}";
+                    }
+                }
+                else
+                {
+                    ProgressText =
+                        $" {TimeCode.FromSeconds(pos + Se.Settings.General.CurrentVideoOffsetInMs / 1000.0).ToDisplayString()} / {fullDuration}{postFix}";
+                }
+            };
+            _positionTimer.Start();
+        }
+
+        private void StartAutoHideControls()
+        {
+            _lastActivityTime = DateTime.UtcNow;
+
+            // When the user opts to hide controls in full-screen, never show them —
+            // not even briefly on entry — and don't bother arming the auto-hide timer.
+            if (Se.Settings.Video.FullscreenHideControls)
+            {
+                HideControls();
+                _autoHideTimer?.Stop();
+                return;
+            }
+
+            // Show controls initially when entering full screen
+            ShowControls();
+
+            // Single one-shot timer reset on each user activity. Stops itself on tick so
+            // Stop()+Start() reliably reschedules a fresh 3-second wait from "now" — a
+            // free-running periodic timer can drift out of phase with _lastActivityTime
+            // and fail to hide after the user re-shows controls during playback.
+            if (_autoHideTimer == null)
+            {
+                _autoHideTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+                _autoHideTimer.Tick += (s, e) =>
+                {
+                    _autoHideTimer?.Stop();
+                    if (IsFullScreen)
+                    {
+                        HideControls();
+                    }
+                };
+            }
+
+            _autoHideTimer.Stop();
+            _autoHideTimer.Start();
+        }
+
+        private void StopAutoHideControls()
+        {
+            _autoHideTimer?.Stop();
+        }
+
+        private void OnUserActivity()
+        {
+            _lastActivityTime = DateTime.UtcNow;
+            if (IsFullScreen)
+            {
+                // If the user opted to hide controls in full-screen, don't reveal them on activity.
+                if (Se.Settings.Video.FullscreenHideControls)
+                {
+                    return;
+                }
+
+                ShowControls();
+                if (_autoHideTimer != null)
+                {
+                    _autoHideTimer.Stop();
+                    _autoHideTimer.Start();
+                }
+            }
+        }
+
+        public void NotifyUserActivity()
+        {
+            OnUserActivity();
+        }
+
+        private void OnKeyDown(object? sender, KeyEventArgs e)
+        {
+            if (IsFullScreen)
+            {
+                OnUserActivity();
+            }
+        }
+
+        public void Reload()
+        {
+            var videoFileName = _videoFileName;
+            var position = Position;
+            Close();
+            Dispatcher.UIThread.Post(async () =>
+            {
+                try
+                {
+                    await Task.Delay(100);
+                    await Open(videoFileName);
+                    await Task.Delay(100);
+                    Position = position;
+                }
+                catch (Exception e)
+                {
+                    Se.LogError(e, "Failed to reload video");
+                }
+            });
+        }
+
+        private void ShowControls()
+        {
+            Dispatcher.UIThread.Post(() =>
+            {
+                _gridProgress.IsVisible = true;
+                SetVideoCursorHidden(false);
+            });
+        }
+
+        private void HideControls()
+        {
+            Dispatcher.UIThread.Post(() =>
+            {
+                _gridProgress.IsVisible = false;
+                SetVideoCursorHidden(true);
+            });
+        }
+
+        /// <summary>
+        /// Auto-hides the mouse pointer together with the on-screen controls while in
+        /// full screen, matching Subtitle Edit 4 behavior (issue #12826). The pointer is
+        /// only hidden in full screen; the docked player always keeps it visible.
+        /// </summary>
+        private void SetVideoCursorHidden(bool hidden)
+        {
+            if (!IsFullScreen)
+            {
+                hidden = false;
+            }
+
+            Cursor = new Cursor(hidden ? StandardCursorType.None : StandardCursorType.Arrow);
+
+            // The mpv "wid" player renders into a native child window that sits on top of
+            // Avalonia, so the Cursor above doesn't cover the video area. Route the request
+            // to the native control, which hides the pointer via its own WndProc.
+            if (PlayerContent is LibMpvDynamicNativeControl nativeControl)
+            {
+                nativeControl.SetCursorHidden(hidden);
+            }
+        }
+
+        internal void SetSpeed(double speed)
+        {
+            _videoPlayerInstance.Speed = speed;
+        }
+
+        public void HideVideoControls()
+        {
+            _gridProgress.IsVisible = false;
+        }
+    }
+}
+

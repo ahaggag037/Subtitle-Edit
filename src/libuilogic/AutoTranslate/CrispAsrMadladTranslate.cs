@@ -1,0 +1,166 @@
+using Nikse.SubtitleEdit.Core.Common;
+using Nikse.SubtitleEdit.UiLogic.Translate;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Nikse.SubtitleEdit.UiLogic.AutoTranslate
+{
+    /// <summary>
+    /// Local translation via the CrispASR command line tool using the MADLAD-400 backend.
+    /// See https://github.com/CrispStrobe/CrispASR
+    /// </summary>
+    public class CrispAsrMadladTranslate : IAutoTranslator
+    {
+        public static string StaticName { get; set; } = "CrispASR MADLAD";
+        public override string ToString() => StaticName;
+        public string Name => StaticName;
+        public string Url => "https://github.com/CrispStrobe/CrispASR";
+        public string Error { get; set; } = string.Empty;
+        public int MaxCharacters => 1000;
+
+        /// <summary>
+        /// Output cap handed to crispasr as <c>--translate-max-tokens</c>. Left to the backend's
+        /// default, a full <see cref="MaxCharacters"/> batch is cut off mid-sentence: that default
+        /// was 256 tokens up to CrispASR v0.8.33 and dropped to 200 in v0.8.34, where an
+        /// 800-character English batch already loses its last lines in German and Hindi. 1024
+        /// covers a 1000-character batch in the token-hungry scripts too, and costs nothing on a
+        /// short line because decoding stops at end-of-sequence. The flag is as old as the madlad
+        /// backend itself (both arrived in v0.6.0), so no installed crispasr rejects it.
+        /// </summary>
+        internal const int MaxOutputTokens = 1024;
+
+        private string _executablePath = string.Empty;
+        private string _modelPath = string.Empty;
+
+        public void Initialize()
+        {
+            _executablePath = Configuration.Settings.Tools.AutoTranslateCrispAsrExe;
+            _modelPath = Configuration.Settings.Tools.AutoTranslateCrispAsrModel;
+        }
+
+        /// <summary>
+        /// The same list as the target languages: MADLAD detects the source language itself and
+        /// ignores <c>-sl</c>, so the choice here only decides what the "swap languages" button
+        /// has to work with.
+        /// </summary>
+        public List<TranslationPair> GetSupportedSourceLanguages()
+        {
+            return CrispAsrMadladLanguages.List();
+        }
+
+        public List<TranslationPair> GetSupportedTargetLanguages()
+        {
+            return CrispAsrMadladLanguages.List();
+        }
+
+        public async Task<string> Translate(string text, string sourceLanguageCode, string targetLanguageCode, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrEmpty(_executablePath) || !File.Exists(_executablePath))
+            {
+                Error = "CrispASR executable not found - please use the 'Download' button to install it. Path: " + _executablePath;
+                throw new Exception(Error);
+            }
+
+            if (string.IsNullOrEmpty(_modelPath) || !File.Exists(_modelPath))
+            {
+                Error = "CrispASR MADLAD model not found - please use the 'Download' button to install it. Path: " + _modelPath;
+                throw new Exception(Error);
+            }
+
+            // An unknown target language is not an error for MADLAD - it silently translates into
+            // the wrong language instead - so refuse it here rather than hand back a subtitle in
+            // whatever language the model settled on.
+            if (!CrispAsrMadladLanguages.IsSupported(targetLanguageCode))
+            {
+                Error = $"CrispASR MADLAD cannot translate to '{targetLanguageCode}' - the model has no such language.";
+                throw new Exception(Error);
+            }
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = _executablePath,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+                WorkingDirectory = Path.GetDirectoryName(_executablePath) ?? string.Empty,
+            };
+            startInfo.ArgumentList.Add("--backend");
+            startInfo.ArgumentList.Add("madlad");
+            startInfo.ArgumentList.Add("-m");
+            startInfo.ArgumentList.Add(_modelPath);
+            startInfo.ArgumentList.Add("--text");
+            startInfo.ArgumentList.Add(text.Trim());
+            startInfo.ArgumentList.Add("-sl");
+            startInfo.ArgumentList.Add(sourceLanguageCode);
+            startInfo.ArgumentList.Add("-tl");
+            startInfo.ArgumentList.Add(targetLanguageCode);
+            startInfo.ArgumentList.Add("--translate-max-tokens");
+            startInfo.ArgumentList.Add(MaxOutputTokens.ToString(CultureInfo.InvariantCulture));
+            startInfo.ArgumentList.Add("--no-prints");
+
+            using (var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true })
+            {
+                var outputBuilder = new StringBuilder();
+                var errorBuilder = new StringBuilder();
+                var exitedSource = new TaskCompletionSource<bool>();
+
+                process.OutputDataReceived += (sender, args) =>
+                {
+                    if (args.Data != null)
+                    {
+                        outputBuilder.AppendLine(args.Data);
+                    }
+                };
+                process.ErrorDataReceived += (sender, args) =>
+                {
+                    if (args.Data != null)
+                    {
+                        errorBuilder.AppendLine(args.Data);
+                    }
+                };
+                process.Exited += (sender, args) => exitedSource.TrySetResult(true);
+
+                process.Start();
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+
+                using (cancellationToken.Register(() =>
+                {
+                    try
+                    {
+                        if (!process.HasExited)
+                        {
+                            process.Kill();
+                        }
+                    }
+                    catch
+                    {
+                        // ignore - process may have already exited
+                    }
+
+                    exitedSource.TrySetCanceled();
+                }))
+                {
+                    await exitedSource.Task.ConfigureAwait(false);
+                }
+
+                if (process.ExitCode != 0)
+                {
+                    Error = errorBuilder.ToString().Trim();
+                    throw new Exception($"CrispASR exited with code {process.ExitCode}: {Error}");
+                }
+
+                return outputBuilder.ToString().Trim();
+            }
+        }
+    }
+}

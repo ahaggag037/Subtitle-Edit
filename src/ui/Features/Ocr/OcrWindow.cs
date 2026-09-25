@@ -1,0 +1,1245 @@
+﻿using Avalonia;
+using Avalonia.Automation;
+using Avalonia.Controls;
+using Avalonia.Controls.Presenters;
+using Avalonia.Controls.Primitives;
+using Avalonia.Controls.Templates;
+using Avalonia.Data;
+using Avalonia.Data.Converters;
+using Avalonia.Input;
+using Avalonia.Layout;
+using Avalonia.Media;
+using Avalonia.Styling;
+using Nikse.SubtitleEdit.Features.Ocr.Engines;
+using Nikse.SubtitleEdit.Features.Ocr.FixEngine;
+using Nikse.SubtitleEdit.Features.Translate;
+using Nikse.SubtitleEdit.Logic;
+using Nikse.SubtitleEdit.Logic.Config;
+using Nikse.SubtitleEdit.Logic.Download;
+using Nikse.SubtitleEdit.Logic.ValueConverters;
+using Optris.Icons.Avalonia;
+using System;
+using System.Collections;
+using System.ComponentModel;
+using System.Globalization;
+using System.Linq;
+using Nikse.SubtitleEdit.UiLogic.Ocr.FixEngine;
+using MenuItem = Avalonia.Controls.MenuItem;
+using Nikse.SubtitleEdit.UiLogic.Ocr;
+
+namespace Nikse.SubtitleEdit.Features.Ocr;
+
+public class OcrWindow : Window
+{
+    public OcrWindow(OcrViewModel vm)
+    {
+        vm.Window = this;
+        UiUtil.InitializeWindow(this, GetType().Name);
+        Title = vm.Title;
+        Width = 1200;
+        Height = 700;
+        MinWidth = 900;
+        MinHeight = 600;
+        CanResize = true;
+        WindowStartupLocation = WindowStartupLocation.CenterOwner;
+        DataContext = vm;
+
+        var topControlsView = MakeTopControlsView(vm);
+        var subtitleView = MakeSubtitleView(vm);
+        var editView = MakeEditView(vm);
+        var buttonView = MakeBottomView(vm);
+
+        var editViewHeight = 215;
+        var editViewRow = new RowDefinition
+        {
+            Height = new GridLength(editViewHeight, GridUnitType.Pixel),
+            MinHeight = 150
+        };
+
+        var grid = new Grid
+        {
+            RowDefinitions =
+            {
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Star), MinHeight = 100 },
+                new RowDefinition { Height = new GridLength(5, GridUnitType.Pixel) },
+                editViewRow,
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+            },
+            ColumnDefinitions =
+            {
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) },
+            },
+            Margin = UiUtil.MakeWindowMargin(),
+            ColumnSpacing = 10,
+            Width = double.NaN,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+
+        // Track the user's preferred height (saved when OCR starts)
+        var savedHeight = (double)editViewHeight;
+
+        // Collapse row when OCR is running, restore when stopped
+        PropertyChangedEventHandler ocrRunningHandler = (s, e) =>
+        {
+            if (e.PropertyName == nameof(vm.IsOcrRunning))
+            {
+                // Dispatch to UI thread since PropertyChanged may be raised from background thread
+                Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                {
+                    try
+                    {
+                        if (vm.IsOcrRunning)
+                        {
+                            // Save current height before collapsing (use actual bounds if available)
+                            if (editView.Bounds.Height > 0)
+                            {
+                                savedHeight = editView.Bounds.Height;
+                            }
+                            else if (editViewRow.Height.GridUnitType == GridUnitType.Pixel && editViewRow.Height.Value > 0)
+                            {
+                                savedHeight = editViewRow.Height.Value;
+                            }
+
+                            // Use Auto to collapse (content is hidden via binding)
+                            editViewRow.Height = new GridLength(1, GridUnitType.Auto);
+                            editViewRow.MinHeight = 0;
+                        }
+                        else
+                        {
+                            // Restore to saved height (ensure it's valid)
+                            var heightToRestore = savedHeight > 0 ? savedHeight : editViewHeight;
+                            editViewRow.MinHeight = 150;
+                            editViewRow.Height = new GridLength(heightToRestore, GridUnitType.Pixel);
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        // Ignore exceptions during height restoration
+                    }
+                });
+            }
+        };
+        vm.PropertyChanged += ocrRunningHandler;
+        Closed += (_, _) => vm.PropertyChanged -= ocrRunningHandler;
+
+        // Set initial state if OCR is already running when window opens
+        if (vm.IsOcrRunning)
+        {
+            editViewRow.Height = new GridLength(1, GridUnitType.Auto);
+            editViewRow.MinHeight = 0;
+        }
+
+        var splitter = new GridSplitter
+        {
+            Height = UiUtil.SplitterWidthOrHeight,
+            ResizeDirection = GridResizeDirection.Rows,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+        splitter.Bind(GridSplitter.IsVisibleProperty, new Binding(nameof(vm.IsOcrRunning)) { Source = vm, Converter = InverseBooleanConverter.Instance });
+
+        grid.Add(topControlsView, 0, 0);
+        grid.Add(subtitleView, 1, 0);
+        grid.Add(splitter, 2, 0);
+        grid.Add(editView, 3, 0);
+        grid.Add(buttonView, 4, 0);
+
+        Content = grid;
+
+        Activated += (_, _) => Focus();
+        Loaded += (s, e) => vm.OnLoaded();
+        Closing += (s, e) => vm.OnClosing(e);
+        KeyDown += (s, e) => vm.OnKeyDown(e);
+        KeyUp += (s, e) => vm.OnWindowKeyUp(e);
+    }
+
+    private static Grid MakeTopControlsView(OcrViewModel vm)
+    {
+        var grid = new Grid
+        {
+            RowDefinitions =
+            {
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+            },
+            ColumnDefinitions =
+            {
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) },
+            },
+            Width = double.NaN,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+
+        var toggleButtonCaptureAlignment = new ToggleButton();
+        Attached.SetIcon(toggleButtonCaptureAlignment, IconNames.DockTop);
+        ToolTip.SetTip(toggleButtonCaptureAlignment, Se.Language.Ocr.CaptureTopAlign);
+        AutomationProperties.SetName(toggleButtonCaptureAlignment, Se.Language.Ocr.CaptureTopAlign);
+        toggleButtonCaptureAlignment.Bind(ToggleButton.IsCheckedProperty, new Binding(nameof(vm.HasCaptureAlignment)));
+
+        var toggleButtonPreProcessing = new ToggleButton
+        {
+            Command = vm.ShowPreProcessingCommand,
+        };
+        toggleButtonPreProcessing.Bind(ToggleButton.IsCheckedProperty, new Binding(nameof(vm.HasPreProcessingSettings)));
+        Attached.SetIcon(toggleButtonPreProcessing, IconNames.Image);
+        ToolTip.SetTip(toggleButtonPreProcessing, Se.Language.Ocr.ImagePreProcessing);
+        AutomationProperties.SetName(toggleButtonPreProcessing, Se.Language.Ocr.ImagePreProcessing);
+
+        var toggleButtonVobSubColors = new ToggleButton
+        {
+            Command = vm.PickVobSubColorsCommand,
+            Margin = new Thickness(2, 0, 0, 0),
+        };
+        toggleButtonVobSubColors.Bind(ToggleButton.IsCheckedProperty, new Binding(nameof(vm.HasCustomVobSubColors)));
+        toggleButtonVobSubColors.Bind(Visual.IsVisibleProperty, new Binding(nameof(vm.IsVobSubVisible)));
+        Attached.SetIcon(toggleButtonVobSubColors, IconNames.Palette);
+        ToolTip.SetTip(toggleButtonVobSubColors, Se.Language.Ocr.VobSubColors);
+        AutomationProperties.SetName(toggleButtonVobSubColors, Se.Language.Ocr.VobSubColors);
+
+        var toggleButtonFallbackDatabase = new ToggleButton
+        {
+            Command = vm.PickFallbackDatabaseCommand,
+            Margin = new Thickness(2, 0, 0, 0),
+        };
+        toggleButtonFallbackDatabase.Bind(ToggleButton.IsCheckedProperty, new Binding(nameof(vm.HasFallbackDatabase)));
+        toggleButtonFallbackDatabase.Bind(Visual.IsVisibleProperty, new Binding(nameof(vm.IsFallbackDatabaseVisible)));
+        Attached.SetIcon(toggleButtonFallbackDatabase, IconNames.DatabaseArrowRight);
+        ToolTip.SetTip(toggleButtonFallbackDatabase, Se.Language.Ocr.FallbackOcrDatabase);
+        AutomationProperties.SetName(toggleButtonFallbackDatabase, Se.Language.Ocr.FallbackOcrDatabase);
+
+        var toggleButtonShowOnlyForced = new ToggleButton();
+        Attached.SetIcon(toggleButtonShowOnlyForced, IconNames.Filter);
+        ToolTip.SetTip(toggleButtonShowOnlyForced, Se.Language.Ocr.ShowOnlyForcedSubtitles);
+        AutomationProperties.SetName(toggleButtonShowOnlyForced, Se.Language.Ocr.ShowOnlyForcedSubtitles);
+        toggleButtonShowOnlyForced.Bind(ToggleButton.IsCheckedProperty, new Binding(nameof(vm.ShowOnlyForced)));
+        toggleButtonShowOnlyForced.Bind(Visual.IsVisibleProperty, new Binding(nameof(vm.HasForcedSubtitles)));
+        toggleButtonShowOnlyForced.Bind(InputElement.IsEnabledProperty, new Binding(nameof(vm.IsOcrRunning)) { Converter = InverseBooleanConverter.Instance });
+
+        var panelRight = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Children =
+            {
+                toggleButtonShowOnlyForced,
+                toggleButtonCaptureAlignment,
+                toggleButtonPreProcessing,
+                toggleButtonVobSubColors,
+                toggleButtonFallbackDatabase,
+            }
+        };
+
+        var comboBoxEngines = UiUtil.MakeComboBox(vm.OcrEngines, vm, nameof(vm.SelectedOcrEngine))
+            .WithMarginRight(10)
+            .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance);
+        comboBoxEngines.SelectionChanged += vm.EngineSelectionChanged;
+        comboBoxEngines.ItemTemplate = MakeOcrEngineItemTemplate();
+        vm.RefreshEngineCombo = () => comboBoxEngines.ItemTemplate = MakeOcrEngineItemTemplate();
+
+        var comboBoxCrispEmbedModels = UiUtil.MakeComboBox(vm.CrispEmbedModels, vm, nameof(vm.SelectedCrispEmbedModel),
+                nameof(vm.IsCrispEmbedVisible))
+            .WithMinWidth(220)
+            .WithMarginRight(5)
+            .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance);
+        comboBoxCrispEmbedModels.ItemTemplate = MakeCrispEmbedModelItemTemplate();
+        vm.RefreshCrispEmbedModelCombo = () => comboBoxCrispEmbedModels.ItemTemplate = MakeCrispEmbedModelItemTemplate();
+
+        var comboBoxLlamaCppModels = UiUtil.MakeComboBox(vm.LlamaCppOcrModels, vm, nameof(vm.SelectedLlamaCppOcrModel),
+                nameof(vm.IsLlamaCppVisible))
+            .WithWidth(220)
+            .WithMarginRight(5)
+            .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance);
+        comboBoxLlamaCppModels.ItemTemplate = LlamaCppDownloadHelper.ModelItemTemplate();
+        vm.RefreshLlamaCppOcrModelCombo = () => comboBoxLlamaCppModels.ItemTemplate = LlamaCppDownloadHelper.ModelItemTemplate();
+
+        var panel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 5,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 0, 10),
+            Children =
+            {
+                UiUtil.MakeLabel(Se.Language.Ocr.OcrEngine),
+                comboBoxEngines,
+
+                // NOcr settings
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.Ocr.Database, vm => vm.IsNOcrVisible),
+                UiUtil.MakeComboBox(vm.NOcrDatabases, vm, nameof(vm.SelectedNOcrDatabase), nameof(vm.IsNOcrVisible))
+                    .WithMarginRight(0)
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+                UiUtil.MakeButton(vm.ShowNOcrSettingsCommand, IconNames.Settings, Se.Language.General.Settings)
+                    .WithMarginRight(20)
+                    .WithMarginBottom(2)
+                    .WithBottomAlignment()
+                    .WithBindIsVisible(nameof(vm.IsNOcrVisible))
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.Ocr.MaxWrongPixels, vm => vm.IsNOcrVisible),
+                UiUtil.MakeComboBox(vm.NOcrMaxWrongPixelsList, vm, nameof(vm.SelectedNOcrMaxWrongPixels),
+                        nameof(vm.IsNOcrVisible))
+                    .WithMarginRight(10)
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.Ocr.NumberOfPixelsIsSpace, vm => vm.IsNOcrVisible),
+                UiUtil.MakeComboBox(vm.NOcrPixelsAreSpaceList, vm, nameof(vm.SelectedNOcrPixelsAreSpace),
+                        nameof(vm.IsNOcrVisible))
+                    .WithMarginRight(10)
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+
+                // Image Compare settings
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.Ocr.Database, vm => vm.IsBinaryImageCompareVisible),
+                UiUtil.MakeComboBox(vm.ImageCompareDatabases, vm, nameof(vm.SelectedImageCompareDatabase), nameof(vm.IsBinaryImageCompareVisible))
+                    .WithMarginRight(0)
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+                UiUtil.MakeButton(vm.ShowBinaryOcrSettingsCommand, IconNames.Settings, Se.Language.General.Settings)
+                    .WithMarginRight(20)
+                    .WithMarginBottom(2)
+                    .WithBottomAlignment()
+                    .WithBindIsVisible(nameof(vm.IsBinaryImageCompareVisible))
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.Ocr.NumberOfPixelsIsSpace, vm => vm.IsBinaryImageCompareVisible),
+                UiUtil.MakeComboBox(vm.BinaryOcrPixelsAreSpaceList, vm, nameof(vm.SelectedBinaryOcrPixelsAreSpace),
+                        nameof(vm.IsBinaryImageCompareVisible))
+                    .WithMarginRight(10)
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.Ocr.MaxErrorPct, vm => vm.IsBinaryImageCompareVisible),
+                UiUtil.MakeNumericUpDownOneDecimal(0, 50, 120, vm, nameof(vm.BinaryOcrMaxErrorPercent), nameof(vm.IsBinaryImageCompareVisible))
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+
+                // Tesseract settings
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.General.Language, vm => vm.IsTesseractVisible),
+                UiUtil.MakeComboBox(vm.TesseractDictionaryItems, vm, nameof(vm.SelectedTesseractDictionaryItem),
+                        nameof(vm.IsTesseractVisible))
+                    .WithWidth(100)
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+                UiUtil.MakeBrowseButton(vm.PickTesseractModelCommand).BindIsVisible(vm, nameof(vm.IsTesseractVisible))
+                    .BindIsEnabled(vm, nameof(vm.IsOcrRunning), InverseBooleanConverter.Instance),
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.Ocr.TesseractEngineMode, vm => vm.IsTesseractVisible)
+                    .WithMarginLeft(10),
+                UiUtil.MakeComboBox(vm.TesseractEngineModes, vm, nameof(vm.SelectedTesseractEngineMode),
+                        nameof(vm.IsTesseractVisible))
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+
+                // Ollama settings
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.General.Language, vm => vm.IsOllamaVisible),
+                UiUtil.MakeComboBox(vm.OllamaLanguages, vm, nameof(vm.SelectedOllamaLanguage),
+                        nameof(vm.IsOllamaVisible))
+                    .WithWidth(100)
+                    .WithMarginRight(10)
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.General.Model, vm => vm.IsOllamaVisible),
+                UiUtil.MakeTextBox(160, vm, nameof(vm.OllamaModel))
+                    .BindIsVisible(vm, nameof(vm.IsOllamaVisible))
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+                UiUtil.MakeBrowseButton(vm.PickOllamaModelCommand)
+                    .BindIsVisible(vm, nameof(vm.IsOllamaVisible))
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.General.Url, vm => vm.IsOllamaVisible),
+                UiUtil.MakeTextBox(220, vm, nameof(vm.OllamaUrl))
+                    .BindIsVisible(vm, nameof(vm.IsOllamaVisible))
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+
+                // llama.cpp settings
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.General.Language, vm => vm.IsLlamaCppVisible),
+                UiUtil.MakeComboBox(vm.OllamaLanguages, vm, nameof(vm.SelectedOllamaLanguage),
+                        nameof(vm.IsLlamaCppVisible))
+                    .WithWidth(100)
+                    .WithMarginRight(10)
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.General.Model, vm => vm.IsLlamaCppVisible),
+                comboBoxLlamaCppModels,
+                UiUtil.MakeButton(vm.DownloadLlamaCppOcrCommand, IconNames.Download, Se.Language.General.Download)
+                    .WithMarginRight(5)
+                    .BindIsVisible(vm, nameof(vm.IsLlamaCppVisible))
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+                MakeLlamaCppOcrToggleServerButton(vm)
+                    .WithMarginRight(5)
+                    .BindIsVisible(vm, nameof(vm.IsLlamaCppVisible))
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+                UiUtil.MakeButton(vm.ShowLlamaCppOcrSettingsCommand, IconNames.Settings, Se.Language.General.Settings)
+                    .WithMarginRight(10)
+                    .BindIsVisible(vm, nameof(vm.IsLlamaCppVisible))
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+
+                // CrispEmbed settings
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.General.Backend, vm => vm.IsCrispEmbedVisible),
+                UiUtil.MakeComboBox(vm.CrispEmbedBackends, vm, nameof(vm.SelectedCrispEmbedBackend),
+                        nameof(vm.IsCrispEmbedVisible))
+                    .WithMarginRight(10)
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.General.Model, vm => vm.IsCrispEmbedVisible),
+                comboBoxCrispEmbedModels,
+                UiUtil.MakeButton(vm.DownloadCrispEmbedCommand, IconNames.Download, Se.Language.General.Download)
+                    .WithMarginRight(5)
+                    .BindIsVisible(vm, nameof(vm.IsCrispEmbedVisible))
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+                // Separate from the download button above, which fetches the selected *model*:
+                // this one re-fetches the engine binaries and re-asks CPU/Vulkan/CUDA, the only
+                // way to change hardware build after the first install (issue #13400).
+                UiUtil.MakeButton(vm.ReDownloadCrispEmbedEngineCommand, IconNames.CloudDownload,
+                        string.Format(Se.Language.General.ReDownloadX, CrispEmbedEngine.StaticName))
+                    .WithMarginRight(10)
+                    .BindIsVisible(vm, nameof(vm.IsCrispEmbedVisible))
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+
+                // Apple Vision settings - language only: the engine ships with macOS, so there is
+                // nothing to download, no key to enter and no model to pick.
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.General.Language, vm => vm.IsAppleVisionVisible),
+                UiUtil.MakeComboBox(vm.AppleVisionLanguages, vm, nameof(vm.SelectedAppleVisionLanguage),
+                        nameof(vm.IsAppleVisionVisible))
+                    .WithWidth(180)
+                    .WithMarginRight(10)
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+
+                // Google vision settings
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.General.Language, vm => vm.IsGoogleVisionVisible),
+                UiUtil.MakeComboBox(vm.GoogleVisionLanguages, vm, nameof(vm.SelectedGoogleVisionLanguage),
+                        nameof(vm.IsGoogleVisionVisible))
+                    .WithWidth(100)
+                    .WithMarginRight(10)
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.General.ApiKey, vm => vm.IsGoogleVisionVisible),
+                UiUtil.MakeTextBox(200, vm, nameof(vm.GoogleVisionApiKey))
+                    .BindIsVisible(vm, nameof(vm.IsGoogleVisionVisible))
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+
+                // Google Lens settings
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.General.Language, vm => vm.IsGoogleLensVisible),
+                UiUtil.MakeComboBox(vm.GoogleLensLanguages, vm, nameof(vm.SelectedGoogleLensLanguage),
+                        nameof(vm.IsGoogleLensVisible))
+                    .WithWidth(100)
+                    .WithMarginRight(10)
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+
+                // Paddle OCR settings
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.General.Language, vm => vm.IsPaddleOcrVisible),
+                UiUtil.MakeComboBox(vm.PaddleOcrLanguages, vm, nameof(vm.SelectedPaddleOcrLanguage),
+                        nameof(vm.IsPaddleOcrVisible))
+                    .WithWidth(100)
+                    .WithMarginRight(10)
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+
+                // Mistral OCR settings
+                UiUtil.MakeLabel<OcrViewModel>(Se.Language.General.ApiKey, vm => vm.IsMistralOcrVisible),
+                UiUtil.MakeTextBox(200, vm, nameof(vm.MistralApiKey))
+                    .BindIsVisible(vm, nameof(vm.IsMistralOcrVisible))
+                    .BindIsEnabled(vm, nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance),
+            }
+        };
+
+        grid.Add(panel, 0);
+        grid.Add(panelRight, 0);
+
+        return grid;
+    }
+
+    private static Border MakeSubtitleView(OcrViewModel vm)
+    {
+        // One brush for every preview cell in this window, so recolouring repaints them all.
+        var previewBackground = ImagePreviewBackground.CreateBrush();
+
+        var fullTimeConverter = new TimeSpanToDisplayFullConverter();
+        var shortTimeConverter = new TimeSpanToDisplayShortConverter();
+
+        // TableView (Avalonia 12.1) pilot #2, after Show history (#12704): this is SE's
+        // heaviest grid - virtualized template columns with per-row bitmaps - chosen to
+        // judge TableView's scrolling against DataGrid's. Differences vs the DataGrid it
+        // replaces: no column sorting (TableView has none), and extended selection
+        // (shift/ctrl-click, shift+arrows) is native ListBox behavior instead of
+        // DataGridCheckboxMultiSelect.
+        //
+        // TableView has no content-based column sizing either - GridLength.Auto is
+        // treated as 1* by its layout helper - so the narrow columns get pixel widths
+        // measured from their widest content (the VM is initialized before the window
+        // ctor, so the items are available here).
+        const double cellChrome = 16; // cell padding/margins + slack
+        double MeasureWidth(string text) =>
+            new FormattedText(text, CultureInfo.CurrentUICulture, FlowDirection.LeftToRight,
+                Typeface.Default, 14, null).Width;
+        double ColumnWidth(string header, string widestCellText) =>
+            Math.Max(MeasureWidth(header), MeasureWidth(widestCellText)) + cellChrome;
+
+        var lastItem = vm.OcrSubtitleItems.LastOrDefault();
+        var maxDuration = vm.OcrSubtitleItems.Count > 0 ? vm.OcrSubtitleItems.Max(p => p.Duration) : TimeSpan.Zero;
+        var numberWidth = ColumnWidth(Se.Language.General.NumberSymbol, vm.OcrSubtitleItems.Count.ToString());
+        var showWidth = ColumnWidth(Se.Language.General.Show,
+            fullTimeConverter.Convert(lastItem?.StartTime ?? TimeSpan.Zero, typeof(string), null, CultureInfo.CurrentUICulture) as string ?? string.Empty);
+        var durationWidth = ColumnWidth(Se.Language.General.Duration,
+            shortTimeConverter.Convert(maxDuration, typeof(string), null, CultureInfo.CurrentUICulture) as string ?? string.Empty);
+        var dataGridSubtitle = new TableView
+        {
+            SelectionMode = SelectionMode.Multiple,
+            CanUserResizeColumns = true,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            Width = double.NaN,
+            Height = double.NaN,
+            DataContext = vm,
+            ItemsSource = vm.OcrSubtitleItems,
+        };
+
+        if (vm.HasForcedSubtitles)
+        {
+            dataGridSubtitle.Columns.Add(new TableViewColumn
+            {
+                Header = Se.Language.General.Forced,
+                Width = new GridLength(MeasureWidth(Se.Language.General.Forced) + cellChrome),
+                CellTheme = UiUtil.TableViewNoPaddingCellTheme,
+                HeaderTheme = UiUtil.TableViewColumnHeaderTheme,
+                CellTemplate = new FuncDataTemplate<OcrSubtitleItem>((_, _) =>
+                    new CheckBox
+                    {
+                        [!ToggleButton.IsCheckedProperty] = new Binding(nameof(OcrSubtitleItem.IsForced)) { Mode = BindingMode.OneWay },
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        IsHitTestVisible = false,
+                        Focusable = false,
+                    }),
+            });
+        }
+
+        dataGridSubtitle.Columns.AddRange(new[]
+        {
+                new TableViewColumn
+                {
+                    Header = Se.Language.General.NumberSymbol,
+                    Width = new GridLength(numberWidth),
+                    CellTheme = UiUtil.TableViewCellTheme,
+                    HeaderTheme = UiUtil.TableViewColumnHeaderTheme,
+                    Binding = new Binding(nameof(OcrSubtitleItem.Number)),
+                },
+                new TableViewColumn
+                {
+                    Header = Se.Language.General.Show,
+                    Width = new GridLength(showWidth),
+                    CellTheme = UiUtil.TableViewCellTheme,
+                    HeaderTheme = UiUtil.TableViewColumnHeaderTheme,
+                    Binding = new Binding(nameof(OcrSubtitleItem.StartTime)) { Converter = fullTimeConverter },
+                },
+                new TableViewColumn
+                {
+                    Header = Se.Language.General.Duration,
+                    Width = new GridLength(durationWidth),
+                    CellTheme = UiUtil.TableViewCellTheme,
+                    HeaderTheme = UiUtil.TableViewColumnHeaderTheme,
+                    Binding = new Binding(nameof(OcrSubtitleItem.Duration)) { Converter = shortTimeConverter },
+                },
+                new TableViewColumn
+                {
+                    Header = Se.Language.General.Image,
+                    Width = new GridLength(vm.ImageMaxWidth + cellChrome),
+                    CellTheme = UiUtil.TableViewNoPaddingCellTheme,
+                    HeaderTheme = UiUtil.TableViewColumnHeaderTheme,
+                    CellTemplate = new FuncDataTemplate<OcrSubtitleItem>((item, _) =>
+                    {
+                        var stackPanel = new StackPanel
+                        {
+                            Orientation = Orientation.Vertical,
+                            Spacing = 5,
+                            Margin = new Thickness(5),
+                        };
+                        var bitmap = item.GetBitmapCropped();
+                        if (bitmap != null)
+                        {
+                            var image = new Image
+                            {
+                                Source = bitmap,
+                                Stretch = Avalonia.Media.Stretch.Uniform
+                            };
+                            image.Bind(Image.MaxHeightProperty, new Binding(nameof(vm.ImageMaxHeight)) { Source = vm });
+                            image.Bind(Image.MaxWidthProperty, new Binding(nameof(vm.ImageMaxWidth)) { Source = vm });
+
+                            // Subtitle bitmaps are usually light text on a transparent background, which
+                            // is invisible on a light grid - give them a backdrop so they show. A
+                            // checkerboard was tried here (issue #12692) but the tiling competes with the
+                            // glyphs at thumbnail size; it is kept only in the pre-processing preview,
+                            // where the image is large enough for it. The colour is shared with the
+                            // binary-edit grid and configurable from either (#14328).
+                            var imageContainer = new Border
+                            {
+                                Background = previewBackground,
+                                CornerRadius = new CornerRadius(3),
+                                Padding = new Thickness(3),
+                                Child = image,
+                            };
+                            stackPanel.Children.Add(imageContainer);
+                        }
+
+                        return stackPanel;
+                    })
+                },
+                new SeTableViewColumn
+                {
+                    Header = Se.Language.General.Text,
+                    NameBinding = new Binding(nameof(OcrSubtitleItem.Text)),
+                    Width = new GridLength(1, GridUnitType.Star),
+                    CellTheme = UiUtil.TableViewNoPaddingCellTheme,
+                    HeaderTheme = UiUtil.TableViewColumnHeaderTheme,
+                    CellTemplate = new FuncDataTemplate<OcrSubtitleItem>((item, _) =>
+                    {
+                        var contentPresenter = new ContentPresenter
+                        {
+                            VerticalAlignment = VerticalAlignment.Center
+                        };
+                        contentPresenter.Margin = new Thickness(3, 1, 3, 1);
+
+                        // Bind to HasFormattedText to trigger updates when FixResult changes
+                        var binding = new Binding(nameof(OcrSubtitleItem.HasFormattedText))
+                        {
+                            Source = item,
+                            Converter = new FuncValueConverter<bool, TextBlock>(hasFormatted =>
+                                item.CreateFormattedText())
+                        };
+
+                        contentPresenter.Bind(ContentPresenter.ContentProperty, binding);
+                        return contentPresenter;
+                    })
+                },
+        });
+
+        // Index-mapped scrollbar (#13579), like the main subtitle grid: the native bar is
+        // pixel-mapped and the virtualizing panel estimates its extent from the average
+        // realized row height, so the thumb jumps around while scrolling. Rows here vary
+        // even more than in the main grid - each holds a subtitle bitmap - so hide the
+        // native vertical bar and dock a row-index one beside the grid instead.
+        dataGridSubtitle.WithAccessibleName(Se.Language.General.ImageBasedSubtitles);
+        TableViewExtras.ApplyDefaultRowNames(dataGridSubtitle); // #12087: rows are named from the columns
+
+        var scrollBarHost = new TableViewIndexScrollBar(dataGridSubtitle);
+
+        // The image thumbnails scale with Ctrl+plus/minus (Image.MaxWidth/MaxHeight are
+        // bound to the VM) - keep the pixel-sized image column in step with the zoom.
+        var imageColumn = dataGridSubtitle.Columns[dataGridSubtitle.Columns.Count - 2];
+        vm.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(vm.ImageMaxWidth))
+            {
+                imageColumn.Width = new GridLength(vm.ImageMaxWidth + cellChrome);
+
+                // Zooming re-measures every row, and the ScrollViewer keeps its pixel
+                // offset - which lands on a different row (zooming out far enough pins the
+                // list to its end). Stay on the row the user was looking at.
+                scrollBarHost.PreserveTopRow();
+            }
+        };
+
+        UiUtil.ApplyTableViewRowStyle(dataGridSubtitle);
+        TableViewExtras.AttachListNavigation(dataGridSubtitle);
+        dataGridSubtitle.Bind(TableView.SelectedItemProperty, new Binding(nameof(vm.SelectedOcrSubtitleItem)) { Source = vm });
+        dataGridSubtitle.KeyDown += vm.SubtitleGridKeyDown;
+        dataGridSubtitle.DoubleTapped += (s, e) => vm.SubtitleGridDoubleTapped();
+        dataGridSubtitle.AddHandler(InputElement.PointerPressedEvent, vm.DataGridSubtitleMacPointerPressed, Avalonia.Interactivity.RoutingStrategies.Tunnel);
+        dataGridSubtitle.AddHandler(InputElement.PointerReleasedEvent, vm.DataGridSubtitleMacPointerReleased, Avalonia.Interactivity.RoutingStrategies.Tunnel);
+        dataGridSubtitle.SelectionChanged += vm.SubtitleGridSelectionChanged;
+        vm.SubtitleGrid = dataGridSubtitle;
+
+        // Create a Flyout for the DataGrid
+        var flyout = new MenuFlyout();
+
+        flyout.Opening += vm.SubtitleGridContextOpening;
+
+        var menuItemOcrSelectedLines = new MenuItem
+        {
+            Header = Se.Language.Ocr.OcrSelectedLines,
+            DataContext = vm,
+            Command = vm.StartOcrSelectedLinesCommand,
+        };
+        menuItemOcrSelectedLines.Bind(Visual.IsVisibleProperty, new Binding(nameof(vm.ShowContextMenu)) { Mode = BindingMode.OneWay });
+        flyout.Items.Add(menuItemOcrSelectedLines);
+
+        var menuItemInspectMatchesForLine = new MenuItem
+        {
+            Header = Se.Language.Ocr.InspectLine,
+            DataContext = vm,
+            Command = vm.InspectLineCommand,
+        };
+        menuItemInspectMatchesForLine.Bind(Visual.IsVisibleProperty, new Binding(nameof(vm.IsInspectLineVisible)) { Mode = BindingMode.OneWay });
+        flyout.Items.Add(menuItemInspectMatchesForLine);
+
+        var menuItemShowImage = new MenuItem
+        {
+            Header = Se.Language.Ocr.ShowImage,
+            DataContext = vm,
+            Command = vm.ViewSelectedImageCommand,
+        };
+        menuItemShowImage.Bind(Visual.IsVisibleProperty, new Binding(nameof(vm.ShowContextMenu)) { Mode = BindingMode.OneWay });
+        flyout.Items.Add(menuItemShowImage);
+
+        var menuItemSaveImage = new MenuItem
+        {
+            Header = Se.Language.General.SaveImageAsDotDotDot,
+            DataContext = vm,
+            Command = vm.SaveImageAsCommand,
+        };
+        menuItemSaveImage.Bind(Visual.IsVisibleProperty, new Binding(nameof(vm.ShowContextMenu)) { Mode = BindingMode.OneWay });
+        flyout.Items.Add(menuItemSaveImage);
+
+        var menuItemCopyImageToClipboard = new MenuItem
+        {
+            Header = Se.Language.General.CopyImageToClipboard,
+            DataContext = vm,
+            Command = vm.CopyImageToClipboardCommand,
+        };
+        menuItemCopyImageToClipboard.Bind(Visual.IsVisibleProperty, new Binding(nameof(vm.ShowContextMenu)) { Mode = BindingMode.OneWay });
+        flyout.Items.Add(menuItemCopyImageToClipboard);
+
+        flyout.Items.Add(new Separator());
+
+        var menuItemDelete = new MenuItem
+        {
+            Header = Se.Language.General.Delete,
+            DataContext = vm,
+            Command = vm.DeleteSelectedLinesCommand,
+        };
+        menuItemDelete.Bind(Visual.IsVisibleProperty, new Binding(nameof(vm.ShowContextMenu)) { Mode = BindingMode.OneWay });
+        flyout.Items.Add(menuItemDelete);
+
+        var menuItemFillSelectedLinesWithClipboard = new MenuItem
+        {
+            Header = Se.Language.Ocr.FillSelectedLinesWithClipboard,
+            DataContext = vm,
+            Command = vm.FillSelectedLinesWithClipboardCommand,
+        };
+        menuItemFillSelectedLinesWithClipboard.Bind(Visual.IsVisibleProperty, new Binding(nameof(vm.HasMultipleLinesSelected)) { Mode = BindingMode.OneWay });
+        flyout.Items.Add(menuItemFillSelectedLinesWithClipboard);
+
+        flyout.Items.Add(new Separator());
+
+        var menuItemItalic = new MenuItem
+        {
+            Header = Se.Language.General.Italic,
+            DataContext = vm,
+            Command = vm.ToggleItalicCommand,
+        };
+        menuItemItalic.Bind(Visual.IsVisibleProperty, new Binding(nameof(vm.ShowContextMenu)) { Mode = BindingMode.OneWay });
+        flyout.Items.Add(menuItemItalic);
+
+        var menuItemBold = new MenuItem
+        {
+            Header = Se.Language.General.Bold,
+            DataContext = vm,
+            Command = vm.ToggleBoldCommand,
+        };
+        menuItemBold.Bind(Visual.IsVisibleProperty, new Binding(nameof(vm.ShowContextMenu)) { Mode = BindingMode.OneWay });
+        flyout.Items.Add(menuItemBold);
+
+        flyout.Items.Add(new Separator());
+
+        var menuItemExport = new MenuItem
+        {
+            Header = Se.Language.Ocr.EditExportDotDotDot,
+            DataContext = vm,
+            Command = vm.ExportCurrentOcrItemsCommand,
+        };
+        menuItemExport.Bind(Visual.IsVisibleProperty, new Binding(nameof(vm.ShowContextMenu)) { Mode = BindingMode.OneWay });
+        flyout.Items.Add(menuItemExport);
+
+        var menuItemImportTextFromSubtitle = new MenuItem
+        {
+            Header = Se.Language.Ocr.ImportTextFromSubtitleDotDotDot,
+            DataContext = vm,
+            Command = vm.ImportTextFromSubtitleCommand,
+        };
+        menuItemImportTextFromSubtitle.Bind(Visual.IsVisibleProperty, new Binding(nameof(vm.ShowContextMenu)) { Mode = BindingMode.OneWay });
+        flyout.Items.Add(menuItemImportTextFromSubtitle);
+
+        var menuItemExportTextAsSubtitle = new MenuItem
+        {
+            Header = Se.Language.Ocr.ExportTextAsSubtitleDotDotDot,
+            DataContext = vm,
+            Command = vm.ExportTextAsSubtitleCommand,
+        };
+        menuItemExportTextAsSubtitle.Bind(Visual.IsVisibleProperty, new Binding(nameof(vm.ShowContextMenu)) { Mode = BindingMode.OneWay });
+        flyout.Items.Add(menuItemExportTextAsSubtitle);
+
+        var menuItemSaveAllImagesWithHtmlIndex = new MenuItem
+        {
+            Header = Se.Language.Ocr.SaveAllImagesWithHtmlIndexDotDotDot,
+            DataContext = vm,
+            Command = vm.SaveAllImagesWithHtmlIndexCommand,
+        };
+        menuItemSaveAllImagesWithHtmlIndex.Bind(Visual.IsVisibleProperty, new Binding(nameof(vm.ShowContextMenu)) { Mode = BindingMode.OneWay });
+        flyout.Items.Add(menuItemSaveAllImagesWithHtmlIndex);
+
+        flyout.Items.Add(new Separator());
+        flyout.Items.Add(ImagePreviewBackground.MakeMenuItem(vm.WindowService, () => vm.Window, previewBackground));
+
+        vm.SubtitleGrid.ContextFlyout = flyout;
+
+        return UiUtil.MakeBorderForControlNoPadding(scrollBarHost).WithMarginBottom(5);
+    }
+
+    private static Border MakeEditView(OcrViewModel vm)
+    {
+        var grid = new Grid
+        {
+            RowDefinitions =
+            {
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Star) },
+            },
+            ColumnDefinitions =
+            {
+                new ColumnDefinition { Width = new GridLength(2, GridUnitType.Star) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+                new ColumnDefinition { Width = new GridLength(3, GridUnitType.Star) },
+            },
+            Width = double.NaN,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            ClipToBounds = true, // Ensure content doesn't affect parent measure
+        };
+
+        var textBoxText = new TextBox
+        {
+            Height = double.NaN,
+            MinHeight = 80,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            AcceptsReturn = true,
+            TextWrapping = Avalonia.Media.TextWrapping.NoWrap,
+            Margin = new Thickness(0, 0, 10, 0),
+            [!TextBox.TextProperty] = new Binding($"{nameof(vm.SelectedOcrSubtitleItem)}.{nameof(OcrSubtitleItem.Text)}")
+            {
+                Source = vm,
+                Mode = BindingMode.TwoWay
+            }
+        };
+
+        textBoxText.Bind(FontFamilyProperty, new Binding(nameof(vm.TextBoxFontFamily)) { Mode = BindingMode.TwoWay });
+        textBoxText.Bind(FontSizeProperty, new Binding(nameof(vm.TextBoxFontSize)) { Mode = BindingMode.TwoWay });
+        textBoxText.Bind(TextBox.FontWeightProperty, new Binding(nameof(vm.TextBoxFontWeight)) { Mode = BindingMode.TwoWay });
+        UiUtil.FixMacDiacriticClipping(textBoxText);
+
+        // Create a Flyout for the TextBox
+        var flyout = new MenuFlyout();
+        var menuItemSetFont = new MenuItem
+        {
+            Header = Se.Language.General.SetFontDotDotDot,
+            DataContext = vm,
+            Command = vm.PickFontCommand,
+        };
+        flyout.Items.Add(menuItemSetFont);
+        textBoxText.ContextFlyout = flyout;
+        textBoxText.PointerReleased += vm.TextBoxPointerReleased;
+        textBoxText.KeyDown += vm.TextBoxKeyDown;
+
+        textBoxText.TextChanged += vm.TextBoxTextChanged;
+        var panelText = new StackPanel
+        {
+            Orientation = Orientation.Vertical,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(10),
+            Children =
+            {
+                UiUtil.MakeLabel(Se.Language.General.Text).WithAlignmentTop(),
+                textBoxText,
+            }
+        };
+
+        var labelDictionary = UiUtil.MakeLabel(Se.Language.General.Dictionary);
+        var comboBoxDictionary = UiUtil.MakeComboBox(vm.Dictionaries, vm, nameof(vm.SelectedDictionary))
+            .WithWidth(175)
+            .WithMarginRight(3);
+        comboBoxDictionary.SelectionChanged += (sender, args) => vm.DictionaryChanged();
+        var buttonDictionaryBrowse = UiUtil.MakeBrowseButton(vm.PickDictionaryCommand);
+        var panelDictionary = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            Children =
+            {
+                labelDictionary,
+                comboBoxDictionary,
+                buttonDictionaryBrowse,
+            }
+        };
+
+        var checkBoxFixOcrErrors = UiUtil.MakeCheckBox(Se.Language.Ocr.FixOcrErrors, vm, nameof(vm.DoFixOcrErrors))
+            .WithBindIsVisible(nameof(vm.IsDictionaryLoaded));
+        var checkBoxPromptForUnknownWords = UiUtil.MakeCheckBox(Se.Language.Ocr.PromptForUknownWords, vm, nameof(vm.DoPromptForUnknownWords))
+            .WithBindIsVisible(nameof(vm.IsDictionaryLoaded));
+        var checkBoxTryToGuessUnknownWords = UiUtil.MakeCheckBox(Se.Language.Ocr.TryToGuessUnknownWords, vm, nameof(vm.DoTryToGuessUnknownWords))
+            .WithBindIsVisible(nameof(vm.IsDictionaryLoaded));
+        var checkBoxAutoBreak = UiUtil.MakeCheckBox(string.Format(Se.Language.Ocr.AutoBreakIfMoreThanXLines, Se.Settings.General.MaxNumberOfLines), vm, nameof(vm.DoAutoBreak));
+
+        var panelOptions = new StackPanel
+        {
+            Orientation = Orientation.Vertical,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            Children =
+            {
+                panelDictionary,
+                checkBoxFixOcrErrors,
+                checkBoxPromptForUnknownWords,
+                checkBoxTryToGuessUnknownWords,
+                checkBoxAutoBreak,
+            }
+        };
+
+        var tabControl = new TabControl
+        {
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            Items =
+            {
+                new TabItem
+                {
+                    Header = new TextBlock
+                    {
+                        Text = Se.Language.Ocr.UnknownWords,
+                        FontSize = UiUtil.ScaledFontSize(16),
+                        FontWeight = Avalonia.Media.FontWeight.Bold,
+                    },
+                    Content = MakeUnknownWordsView(vm),
+                },
+                new TabItem
+                {
+                    Header = new TextBlock
+                    {
+                        Text = Se.Language.Ocr.AllFixes,
+                        FontSize = UiUtil.ScaledFontSize(16),
+                        FontWeight = Avalonia.Media.FontWeight.Bold,
+                    },
+                    Content = MakeAllFixesView(vm)
+                },
+                new TabItem
+                {
+                    Header = new TextBlock
+                    {
+                        Text = Se.Language.Ocr.GuessesUsed,
+                        FontSize = UiUtil.ScaledFontSize(16),
+                        FontWeight = Avalonia.Media.FontWeight.Bold,
+                    },
+                    Content = MakeGuessesUsedView(vm)
+                },
+            }
+        };
+        tabControl.Bind(TabControl.IsVisibleProperty, new Binding(nameof(vm.IsDictionaryLoaded)));
+
+        grid.Add(panelText, 0, 0);
+        grid.Add(panelOptions, 0, 1);
+        grid.Add(tabControl, 0, 2);
+
+        var border = UiUtil.MakeBorderForControl(grid).WithMarginBottom(5);
+        border.ClipToBounds = true; // Prevent content from pushing the parent row larger
+        border.Bind(Border.IsVisibleProperty, new Binding(nameof(vm.IsOcrRunning)) { Source = vm, Converter = InverseBooleanConverter.Instance });
+
+        return border;
+    }
+
+    private static Grid MakeUnknownWordsView(OcrViewModel vm)
+    {
+        var grid = new Grid
+        {
+            RowDefinitions =
+            {
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Star) },
+            },
+            ColumnDefinitions =
+            {
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+            },
+            Width = double.NaN,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+
+        var listBox = new ListBox
+        {
+            [Avalonia.Automation.AutomationProperties.NameProperty] = Se.Language.Ocr.UnknownWords,
+            [!ListBox.ItemsSourceProperty] = new Binding(nameof(vm.UnknownWords)) { Mode = BindingMode.OneWay },
+            [!ListBox.SelectedItemProperty] = new Binding(nameof(vm.SelectedUnknownWord)) { Mode = BindingMode.TwoWay },
+            Width = double.NaN,
+            Height = double.NaN,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+        };
+        listBox.Styles.Add(new Style(x => x.OfType<ListBoxItem>())
+        {
+            Setters =
+            {
+                new Setter(ListBoxItem.PaddingProperty, new Thickness(2)),
+                new Setter(ListBoxItem.MarginProperty, new Thickness(0)),
+            }
+        });
+
+        listBox.ItemTemplate = new FuncDataTemplate<UnknownWordItem>((item, _) =>
+        {
+            var tb = new TextBlock { Text = item?.ToString() };
+            tb.Bind(TextBlock.FontFamilyProperty, new Binding(nameof(vm.TextBoxFontFamily)) { Source = vm, Mode = BindingMode.OneWay });
+            return tb;
+        });
+        listBox.SelectionChanged += (s, e) => vm.UnknownWordSelectionChanged();
+        listBox.Tapped += (s, e) => vm.UnknownWordSelectionTapped();
+        listBox.KeyDown += (s, e) => vm.UnknownWordListKeyDown(e);
+
+
+        var flyout = new MenuFlyout();
+        var menuItemClear = new MenuItem
+        {
+            Header = Se.Language.General.Clear,
+            DataContext = vm,
+            Command = vm.UnknownWordsClearCommand,
+        };
+        flyout.Items.Add(menuItemClear);
+
+        var menuItemRemoveCurrent = new MenuItem
+        {
+            DataContext = vm,
+            Command = vm.UnknownWordsRemoveCurrentCommand,
+        };
+        menuItemRemoveCurrent.Bind(MenuItem.IsVisibleProperty, new Binding(nameof(vm.IsUnknownWordSelected)) { Mode = BindingMode.OneWay });
+        menuItemRemoveCurrent.Bind(MenuItem.HeaderProperty, new Binding(nameof(vm.UnknownWordsRemoveCurrentText)) { Mode = BindingMode.OneWay });
+
+        flyout.Items.Add(menuItemRemoveCurrent);
+
+        listBox.ContextFlyout = flyout;
+
+
+        var buttonAddToNamesList = UiUtil.MakeButton(Se.Language.General.AddToNamesListCaseSensitive, vm.AddUnknownWordToNamesCommand)
+            .WithBindEnabled(nameof(vm.IsUnknownWordSelected))
+            .WithHorizontalAlignmentStretch();
+        var buttonAddToUserDictionary = UiUtil.MakeButton(Se.Language.General.AddToUserDictionary, vm.AddUnknownWordToUserDictionaryCommand)
+            .WithBindEnabled(nameof(vm.IsUnknownWordSelected))
+            .WithHorizontalAlignmentStretch();
+        var buttonAddToOcrPair = UiUtil.MakeButton(Se.Language.Ocr.AddToOcrPair, vm.AddUnknownWordToOcrPairCommand)
+            .WithBindEnabled(nameof(vm.IsUnknownWordSelected))
+            .WithHorizontalAlignmentStretch();
+        var buttonGoogleIt = UiUtil.MakeButton(Se.Language.General.GoogleIt, vm.GoogleUnknowWordCommand)
+            .WithBindEnabled(nameof(vm.IsUnknownWordSelected))
+            .WithHorizontalAlignmentStretch();
+        var panelButtons = UiUtil.MakeVerticalPanel
+        (
+            buttonAddToNamesList,
+            buttonAddToUserDictionary,
+            buttonAddToOcrPair,
+            buttonGoogleIt
+        );
+
+        grid.Add(listBox, 0, 0);
+        grid.Add(panelButtons, 0, 1);
+
+        return grid;
+    }
+
+    private static Grid MakeAllFixesView(OcrViewModel vm)
+    {
+        var grid = new Grid
+        {
+            RowDefinitions =
+            {
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Star) },
+            },
+            ColumnDefinitions =
+            {
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) },
+            },
+            Width = double.NaN,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+
+        var listBox = new ListBox
+        {
+            [Avalonia.Automation.AutomationProperties.NameProperty] = Se.Language.Ocr.AllFixes,
+            [!ListBox.ItemsSourceProperty] = new Binding(nameof(vm.AllFixes)) { Mode = BindingMode.OneWay },
+            [!ListBox.SelectedItemProperty] = new Binding(nameof(vm.SelectedAllFix)) { Mode = BindingMode.TwoWay },
+            Width = double.NaN,
+            Height = double.NaN,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+        };
+        listBox.Styles.Add(new Style(x => x.OfType<ListBoxItem>())
+        {
+            Setters =
+            {
+                new Setter(ListBoxItem.PaddingProperty, new Thickness(2)),
+                new Setter(ListBoxItem.MarginProperty, new Thickness(0)),
+            }
+        });
+
+        listBox.ItemTemplate = new FuncDataTemplate<ReplacementUsedItem>((item, _) =>
+        {
+            var tb = new TextBlock { Text = item?.ToString() };
+            tb.Bind(TextBlock.FontFamilyProperty, new Binding(nameof(vm.TextBoxFontFamily)) { Source = vm, Mode = BindingMode.OneWay });
+            return tb;
+        });
+        ScrollViewer.SetHorizontalScrollBarVisibility(listBox, ScrollBarVisibility.Auto);
+        listBox.SelectionChanged += (s, e) => vm.AllFixesTapped();
+        listBox.Tapped += (s, e) => vm.AllFixesTapped();
+
+        grid.Add(listBox, 0, 0);
+
+        return grid;
+    }
+
+    private static Grid MakeGuessesUsedView(OcrViewModel vm)
+    {
+        var grid = new Grid
+        {
+            RowDefinitions =
+            {
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Star) },
+            },
+            ColumnDefinitions =
+            {
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) },
+            },
+            Width = double.NaN,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+
+        var listBox = new ListBox
+        {
+            [Avalonia.Automation.AutomationProperties.NameProperty] = Se.Language.Ocr.GuessesUsed,
+            [!ListBox.ItemsSourceProperty] = new Binding(nameof(vm.AllGuesses)) { Mode = BindingMode.OneWay },
+            [!ListBox.SelectedItemProperty] = new Binding(nameof(vm.SelectedAllGuess)) { Mode = BindingMode.TwoWay },
+            Width = double.NaN,
+            Height = double.NaN,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+        };
+        listBox.Styles.Add(new Style(x => x.OfType<ListBoxItem>())
+        {
+            Setters =
+            {
+                new Setter(ListBoxItem.PaddingProperty, new Thickness(2)),
+                new Setter(ListBoxItem.MarginProperty, new Thickness(0)),
+            }
+        });
+        listBox.ItemTemplate = new FuncDataTemplate<GuessUsedItem>((item, _) =>
+        {
+            var tb = new TextBlock { Text = item?.ToString() };
+            tb.Bind(TextBlock.FontFamilyProperty, new Binding(nameof(vm.TextBoxFontFamily)) { Source = vm, Mode = BindingMode.OneWay });
+            return tb;
+        });
+        listBox.SelectionChanged += (s, e) => vm.GuessUsedTapped();
+        listBox.Tapped += (s, e) => vm.GuessUsedTapped();
+
+        grid.Add(listBox, 0, 0);
+
+        return grid;
+    }
+
+    private static Grid MakeBottomView(OcrViewModel vm)
+    {
+        var progressBar = UiUtil.MakeProgressBar();
+        progressBar.Width = double.NaN;
+        progressBar.HorizontalAlignment = HorizontalAlignment.Stretch;
+        progressBar.VerticalAlignment = VerticalAlignment.Top;
+        progressBar.Bind(ProgressBar.ValueProperty, new Binding(nameof(vm.ProgressValue)));
+        progressBar.Bind(ProgressBar.IsVisibleProperty, new Binding(nameof(vm.IsOcrRunning)) { Source = vm });
+
+        var statusText = new TextBlock().WithMarginTop(14).WithAlignmentTop();
+        statusText.Bind(TextBlock.TextProperty, new Binding(nameof(vm.ProgressText)));
+        statusText.Bind(TextBlock.IsVisibleProperty, new Binding(nameof(vm.IsOcrRunning)) { Source = vm });
+
+        var buttonStart = UiUtil.MakeButton(Se.Language.Ocr.StartOcr, vm.StartOcrCommand)
+            .WithBindIsVisible(nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance).WithBottomAlignment();
+        var buttonPause = UiUtil.MakeButton(Se.Language.Ocr.PauseOcr, vm.PauseOcrCommand)
+            .WithBindIsVisible(nameof(OcrViewModel.IsOcrRunning)).WithBottomAlignment();
+        var buttonInspect = UiUtil.MakeButton(Se.Language.Ocr.InspectLine, vm.InspectLineCommand)
+            .WithBindIsVisible(nameof(OcrViewModel.IsInspectLineVisible))
+            .WithBindIsEnabled(nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance)
+            .WithBottomAlignment();
+        var buttonInspectAdditions = UiUtil.MakeButton(Se.Language.General.InspectAdditions, vm.InspectAdditionsCommand)
+            .WithBindIsVisible(nameof(vm.IsInspectAdditionsVisible))
+            .WithBindIsEnabled(nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance)
+            .WithBottomAlignment();
+        var buttonExport = UiUtil.MakeButton(Se.Language.Ocr.EditExportDotDotDot, vm.EditExportCommand)
+            .WithBindIsEnabled(nameof(OcrViewModel.IsOcrRunning), InverseBooleanConverter.Instance).WithBottomAlignment();
+        var buttonOk = UiUtil.MakeButtonOk(vm.OkCommand).WithBottomAlignment();
+        var buttonCancel = UiUtil.MakeButtonCancel(vm.CancelCommand).WithBottomAlignment();
+
+        var grid = new Grid
+        {
+            RowDefinitions =
+            {
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+            },
+            ColumnDefinitions =
+            {
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+            },
+            Width = double.NaN,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+
+        var subtitleCountText = new TextBlock
+        {
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(5, 0, 0, 0),
+        };
+        subtitleCountText.Bind(TextBlock.TextProperty, new Binding(nameof(vm.SelectionStatus)) { Source = vm });
+        subtitleCountText.Bind(TextBlock.IsVisibleProperty, new Binding(nameof(vm.IsOcrRunning)) { Source = vm, Converter = InverseBooleanConverter.Instance });
+
+        grid.Add(progressBar, 0, 0);
+        grid.Add(statusText, 0, 0);
+        grid.Add(subtitleCountText, 0, 0);
+        grid.Add(buttonStart, 0, 1);
+        grid.Add(buttonPause, 0, 2);
+        grid.Add(buttonInspect, 0, 3);
+        grid.Add(buttonInspectAdditions, 0, 4);
+        grid.Add(buttonExport, 0, 5);
+        grid.Add(buttonOk, 0, 6);
+        grid.Add(buttonCancel, 0, 7);
+
+        return grid;
+    }
+
+    private static Button MakeLlamaCppOcrToggleServerButton(OcrViewModel vm)
+    {
+        var button = UiUtil.MakeButton(string.Empty, vm.ToggleLlamaCppOcrServerCommand);
+        button.Bind(Button.ContentProperty, new Binding(nameof(vm.LlamaCppOcrServerButtonText)));
+        return button;
+    }
+
+    // Engine combo item template: CrispEmbed and llama.cpp are the OCR engines with a locally
+    // tracked install, so they get the install-status dot (green = ready, amber = update
+    // available, grey = not downloaded yet); CrispEmbed also shows its download size until it is
+    // on disk. Engines with nothing for us to download show no dot.
+    private static FuncDataTemplate<OcrEngineItem> MakeOcrEngineItemTemplate()
+    {
+        return StatusDots.ComboItemTemplate<OcrEngineItem>(
+            engine => engine.Name,
+            engine => engine.EngineType == OcrEngineType.CrispEmbed && !CrispEmbedEngine.IsEngineInstalled()
+                ? CrispEmbedEngine.DownloadSizeText
+                : null,
+            GetOcrEngineDotStatus);
+    }
+
+    private static DownloadDotStatus GetOcrEngineDotStatus(OcrEngineItem engine)
+    {
+        switch (engine.EngineType)
+        {
+            case OcrEngineType.LlamaCpp:
+                return LlamaCppDownloadHelper.GetEngineDotStatus();
+            case OcrEngineType.CrispEmbed:
+                return CrispEmbedEngine.IsEngineInstalled()
+                    // Installed: the cheap .installed.sha256 sidecar turns an outdated build amber.
+                    ? StatusDots.From(true, DownloadHashManager.GetSidecarStatus(CrispEmbedEngine.GetAndCreateFolder()))
+                    : DownloadDotStatus.NotInstalled;
+            default:
+                return DownloadDotStatus.None;
+        }
+    }
+
+    // Model combo item template: a dot (green = downloaded, grey = not downloaded yet) plus the
+    // model's download size - same treatment as the speech-to-text model combo.
+    private static FuncDataTemplate<CrispEmbedModelDisplay> MakeCrispEmbedModelItemTemplate()
+    {
+        return StatusDots.ComboItemTemplate<CrispEmbedModelDisplay>(
+            model => model.Model.Name,
+            model => string.IsNullOrEmpty(model.Model.Size) ? null : model.Model.Size,
+            model => model.Backend.IsModelInstalled(model.Model)
+                ? DownloadDotStatus.UpToDate
+                : DownloadDotStatus.NotInstalled);
+    }
+}

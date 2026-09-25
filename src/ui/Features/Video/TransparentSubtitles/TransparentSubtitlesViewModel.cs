@@ -1,0 +1,1748 @@
+﻿using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Media;
+using Avalonia.Media.Imaging;
+using Avalonia.Skia;
+using Avalonia.Threading;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Nikse.SubtitleEdit.Controls.VideoPlayer;
+using Nikse.SubtitleEdit.Core.Common;
+using Nikse.SubtitleEdit.Core.SubtitleFormats;
+using Nikse.SubtitleEdit.Features.Main.Layout;
+using Nikse.SubtitleEdit.Features.Shared.PromptFileSaved;
+using Nikse.SubtitleEdit.Features.Shared;
+using Nikse.SubtitleEdit.Features.Shared.PromptTextBox;
+using Nikse.SubtitleEdit.Features.Video.BurnIn;
+using Nikse.SubtitleEdit.Logic;
+using Nikse.SubtitleEdit.Logic.Config;
+using Nikse.SubtitleEdit.Logic.Media;
+using Nikse.SubtitleEdit.Logic.VideoPlayers.LibMpvDynamic;
+using SkiaSharp;
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using System.Timers;
+using Nikse.SubtitleEdit.UiLogic.Media;
+
+namespace Nikse.SubtitleEdit.Features.Video.TransparentSubtitles;
+
+public partial class TransparentSubtitlesViewModel : ObservableObject
+{
+    [ObservableProperty] private string _videoFileName;
+    [ObservableProperty] private string _videoFileSize;
+    [ObservableProperty] private ObservableCollection<string> _fontNames;
+    [ObservableProperty] private string _selectedFontName;
+    [ObservableProperty] private double? _fontFactor;
+    [ObservableProperty] private string _fontFactorText;
+    [ObservableProperty] private bool _fontIsBold;
+    [ObservableProperty] private decimal? _selectedFontOutline;
+    [ObservableProperty] private string _fontOutlineText;
+    [ObservableProperty] private decimal? _selectedFontShadowWidth;
+    [ObservableProperty] private decimal? _selectedFontSpacing;
+    [ObservableProperty] private string _fontShadowText;
+    [ObservableProperty] private ObservableCollection<FontBoxItem> _fontBoxTypes;
+    [ObservableProperty] private FontBoxItem _selectedFontBoxType;
+    [ObservableProperty] private Color _fontTextColor;
+    [ObservableProperty] private Color _fontBoxColor;
+    [ObservableProperty] private Color _fontOutlineColor;
+    [ObservableProperty] private Color _fontShadowColor;
+    [ObservableProperty] private int? _fontMarginHorizontal;
+    [ObservableProperty] private int? _fontMarginVertical;
+    [ObservableProperty] private bool _fontFixRtl;
+    [ObservableProperty] private ObservableCollection<AlignmentItem> _fontAlignments;
+    [ObservableProperty] private AlignmentItem _selectedFontAlignment;
+    [ObservableProperty] private string _fontAssaInfo;
+    [ObservableProperty] private int? _videoWidth;
+    [ObservableProperty] private int? _videoHeight;
+    [ObservableProperty] private ObservableCollection<double> _frameRates;
+    [ObservableProperty] private double _selectedFrameRate;
+    [ObservableProperty] private ObservableCollection<string> _videoExtensions;
+    [ObservableProperty] private string _selectedVideoExtension;
+    [ObservableProperty] private string _outputFolder;
+    [ObservableProperty] private bool _useOutputFolderVisible;
+    [ObservableProperty] private bool _useSourceFolderVisible;
+    [ObservableProperty] private bool _isSingleModeVisible;
+    [ObservableProperty] private bool _isCutActive;
+    [ObservableProperty] private TimeSpan _cutFrom;
+    [ObservableProperty] private TimeSpan _cutTo;
+    [ObservableProperty] private bool _useTargetFileSize;
+    [ObservableProperty] private int? _targetFileSize;
+    [ObservableProperty] private string _progressText;
+    [ObservableProperty] private double _progressValue;
+    [ObservableProperty] private ObservableCollection<BurnInJobItem> _jobItems;
+    [ObservableProperty] private BurnInJobItem? _selectedJobItem;
+    [ObservableProperty] private bool _isGenerating;
+    [ObservableProperty] private bool _isBatchMode;
+    [ObservableProperty] private Bitmap? _imagePreview;
+    [ObservableProperty] private bool _useSourceResolution;
+    [ObservableProperty] private string _displayEffect;
+    [ObservableProperty] private bool _promptForFfmpegParameters;
+
+    public Window? Window { get; set; }
+    public bool OkPressed { get; private set; }
+
+    private Subtitle _subtitle = new();
+    private bool _loading = true;
+    private readonly StringBuilder _log;
+    private readonly TempSubtitleFiles _tempSubtitleFiles = new();
+    private long _startTicks;
+    private long _processedFrames;
+    private Process? _ffmpegProcess;
+    private readonly Timer _timerAnalyze;
+    private readonly Timer _timerGenerate;
+    private bool _doAbort;
+    private volatile bool _isClosing;
+    private int _jobItemIndex = -1;
+    private SubtitleFormat? _subtitleFormat;
+    private string _inputVideoFileName;
+    private const string StatusSkipped = "Skipped";
+    private List<BurnInEffectItem> _selectedEffects;
+
+    public VideoPlayerControl? VideoPlayerControl { get; set; }
+    private VideoPlayerControl? _fullScreenVideoPlayerControl;
+    private LibMpvDynamicPlayer? _mpvPreviewPlayer;
+    private DispatcherTimer? _previewTimer;
+    private string _oldPreviewAssa = string.Empty;
+    private bool _previewDirty = true; // true = preview ASSA must be regenerated on the next timer tick
+    private readonly string _tempPreviewAssaFileName;
+    private bool _isPreviewSubtitleLoaded;
+
+    private readonly IWindowService _windowService;
+    private readonly IFolderHelper _folderHelper;
+    private readonly IFileHelper _fileHelper;
+
+    public TransparentSubtitlesViewModel(IFolderHelper folderHelper, IFileHelper fileHelper,
+        IWindowService windowService)
+    {
+        _folderHelper = folderHelper;
+        _fileHelper = fileHelper;
+        _windowService = windowService;
+
+        FontNames = new ObservableCollection<string>(FontHelper.GetLibAssaFonts());
+        SelectedFontName = FontNames.FirstOrDefault(p => p == Se.Settings.Video.BurnIn.FontName) ?? FontNames[0];
+
+        // font factors between 0-1
+        FontFactor = 0.4;
+        FontFactorText = string.Empty;
+
+        FontBoxTypes = new ObservableCollection<FontBoxItem>
+        {
+            new(FontBoxType.None, Se.Language.General.None),
+            new(FontBoxType.OneBox, Se.Language.Video.BurnIn.OneBox),
+            new(FontBoxType.BoxPerLine, Se.Language.General.BoxPerLine),
+        };
+        SelectedFontBoxType = FontBoxTypes[0];
+
+        FontMarginHorizontal = 10;
+        FontMarginVertical = 10;
+
+        FontAlignments = new ObservableCollection<AlignmentItem>(AlignmentItem.Alignments);
+        SelectedFontAlignment = AlignmentItem.Alignments[7];
+
+        FontAssaInfo = string.Empty;
+
+        VideoWidth = 1920;
+        VideoHeight = 1080;
+
+        FrameRates = new ObservableCollection<double> { 23.976, 24, 25, 29.97, 30, 50, 59.94, 60 };
+        SelectedFrameRate = FrameRates[0];
+
+        // Transparent output is always encoded as ProRes 4444, which mp4 has no tag for and WebM
+        // cannot carry at all - offering those two only produced a failed run with no file.
+        VideoExtensions = new ObservableCollection<string>(OutputContainer.GetExtensions("prores_ks"));
+        SelectedVideoExtension = VideoExtensions[0];
+
+        JobItems = new ObservableCollection<BurnInJobItem>();
+
+        VideoFileName = string.Empty;
+        VideoFileSize = string.Empty;
+        ProgressText = string.Empty;
+        FontOutlineText = string.Empty;
+        FontShadowText = string.Empty;
+        OutputFolder = string.Empty;
+        DisplayEffect = string.Empty;
+
+        _selectedEffects = new List<BurnInEffectItem>();
+        _tempPreviewAssaFileName = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".ass");
+        _log = new StringBuilder();
+        _timerGenerate = new();
+        _timerGenerate.Elapsed += TimerGenerateElapsed;
+        _timerGenerate.Interval = 100;
+
+        _timerAnalyze = new();
+        _timerAnalyze.Elapsed += TimerAnalyzeElapsed;
+        _timerAnalyze.Interval = 100;
+
+        _loading = false;
+
+        _previewDirty = true;
+        _inputVideoFileName = string.Empty;
+        LoadSettings();
+        BoxTypeChanged();
+        UpdateOutputProperties();
+    }
+
+    public void Initialize(string videoFileName, Subtitle subtitle, SubtitleFormat subtitleFormat)
+    {
+        VideoFileName = videoFileName;
+        _inputVideoFileName = videoFileName;
+        _subtitle = new Subtitle(subtitle, false);
+        _subtitleFormat = subtitleFormat;
+        _previewDirty = true;
+
+        var fileExists = !string.IsNullOrWhiteSpace(videoFileName) && File.Exists(videoFileName);
+        if (fileExists)
+        {
+            VideoFileSize = Utilities.FormatBytesToDisplayFileSize(new FileInfo(videoFileName).Length);
+            _ = Task.Run(() =>
+            {
+                var mediaInfo = FfmpegMediaInfo2.Parse(videoFileName);
+                Dispatcher.UIThread.Post(() =>
+                {
+                    VideoWidth = mediaInfo.Dimension.Width;
+                    VideoHeight = mediaInfo.Dimension.Height;
+                });
+            });
+        }
+        else
+        {
+            BatchMode();
+        }
+    }
+
+    private void TimerAnalyzeElapsed(object? sender, ElapsedEventArgs e)
+    {
+        if (_ffmpegProcess == null || _isClosing)
+        {
+            return;
+        }
+
+        if (_doAbort)
+        {
+            _timerAnalyze.Stop();
+#pragma warning disable CA1416
+            _ffmpegProcess.Kill(true);
+#pragma warning restore CA1416
+
+            IsGenerating = false;
+            return;
+        }
+
+        if (!_ffmpegProcess.HasExited)
+        {
+            var percentage = (int)Math.Round(GetProgressPercentage(JobItems[_jobItemIndex]), MidpointRounding.AwayFromZero);
+            percentage = Math.Clamp(percentage, 0, 100);
+
+            var durationMs = (DateTime.UtcNow.Ticks - _startTicks) / 10_000;
+            var msPerFrame = (float)durationMs / _processedFrames;
+            var estimatedTotalMs = msPerFrame * JobItems[_jobItemIndex].TotalFrames;
+            var estimatedLeft = ProgressHelper.ToProgressTime(estimatedTotalMs - durationMs);
+
+            if (JobItems.Count == 1)
+            {
+                ProgressText = $"Analyzing video... {percentage}%     {estimatedLeft}";
+            }
+            else
+            {
+                ProgressText = $"Analyzing video {_jobItemIndex + 1}/{JobItems.Count}... {percentage}%     {estimatedLeft}";
+            }
+
+            return;
+        }
+
+        _timerAnalyze.Stop();
+
+        Dispatcher.UIThread.Post(async void () =>
+        {
+            try
+            {
+                var jobItem = JobItems[_jobItemIndex];
+                var process = await GetFfmpegProcess(jobItem);
+                if (process == null || _isClosing)
+                {
+                    // No process and no timer running: nothing else would reset the generating state.
+                    jobItem.Status = Se.Language.General.Error;
+                    IsGenerating = false;
+                    ProgressValue = 0;
+                    return;
+                }
+
+                _ffmpegProcess = process;
+#pragma warning disable CA1416 // Validate platform compatibility
+                _ffmpegProcess.Start();
+#pragma warning restore CA1416 // Validate platform compatibility
+                _ffmpegProcess.BeginOutputReadLine();
+                _ffmpegProcess.BeginErrorReadLine();
+
+                _timerGenerate.Start();
+            }
+            catch (Exception exception)
+            {
+                Se.LogError(exception);
+            }
+        });
+    }
+
+    private void TimerGenerateElapsed(object? sender, ElapsedEventArgs e)
+    {
+        // A tick already queued when the window closed must not report on the killed process
+        // or start the next batch item.
+        if (_ffmpegProcess == null || _isClosing)
+        {
+            return;
+        }
+
+        if (_doAbort)
+        {
+            _timerGenerate.Stop();
+#pragma warning disable CA1416
+            _ffmpegProcess.Kill(true);
+#pragma warning restore CA1416
+
+            IsGenerating = false;
+            return;
+        }
+
+        if (!_ffmpegProcess.HasExited)
+        {
+            var percentage = (int)Math.Round(GetProgressPercentage(JobItems[_jobItemIndex]), MidpointRounding.AwayFromZero);
+            percentage = Math.Clamp(percentage, 0, 100);
+
+            var durationMs = (DateTime.UtcNow.Ticks - _startTicks) / 10_000;
+            var msPerFrame = (float)durationMs / _processedFrames;
+            var estimatedTotalMs = msPerFrame * JobItems[_jobItemIndex].TotalFrames;
+            var estimatedLeft = ProgressHelper.ToProgressTime(estimatedTotalMs - durationMs);
+
+            if (JobItems.Count == 1)
+            {
+                ProgressText = $"Generating video... {percentage}%     {estimatedLeft}";
+            }
+            else
+            {
+                ProgressText = $"Generating video {_jobItemIndex + 1}/{JobItems.Count}... {percentage}%     {estimatedLeft}";
+            }
+
+            return;
+        }
+
+        _timerGenerate.Stop();
+        ProgressValue = 100;
+        ProgressText = string.Empty;
+
+        var jobItem = JobItems[_jobItemIndex];
+
+        // The output file existing is not proof that this run produced it: a failed ffmpeg can
+        // leave an empty or truncated file behind, and that was reported as "Done". The process
+        // has exited here (HasExited above), so the exit code can be read.
+        var process = _ffmpegProcess;
+        var exitCode = process.ExitCode;
+        if (exitCode != 0 || !OutputFileHasContent(jobItem.OutputVideoFileName))
+        {
+            Se.WriteToolsLog("Output video file not generated: " + jobItem.OutputVideoFileName + Environment.NewLine +
+                             "ffmpeg: " + process.StartInfo.FileName + Environment.NewLine +
+                             "Parameters: " + process.StartInfo.Arguments + Environment.NewLine +
+                             "OS: " + Environment.OSVersion + Environment.NewLine +
+                             "64-bit: " + Environment.Is64BitOperatingSystem + Environment.NewLine +
+                             "ffmpeg exit code: " + exitCode + Environment.NewLine +
+                             "ffmpeg log: " + _log);
+
+            jobItem.Status = Se.Language.General.Error;
+
+            Dispatcher.UIThread.Invoke(async () =>
+            {
+                if (_isClosing)
+                {
+                    return;
+                }
+
+                await MessageBox.Show(Window!,
+                    "Unable to generate video",
+                    "Output video file not generated: " + jobItem.OutputVideoFileName + Environment.NewLine +
+                    "ffmpeg exit code: " + exitCode + Environment.NewLine +
+                    "Parameters: " + process.StartInfo.Arguments,
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+
+                IsGenerating = false;
+                ProgressValue = 0;
+            });
+
+            return;
+        }
+
+        JobItems[_jobItemIndex].Status = UiUtil.RemoveAccessKey(Se.Language.General.Done);
+
+        Dispatcher.UIThread.Invoke(async () =>
+        {
+            await ContinueWithNextJobItemOrFinish();
+        });
+    }
+
+    /// <summary>
+    /// Starts the next batch item, or ends the run with the "done" dialog. Called on the UI thread
+    /// after an item finished - or was skipped before ffmpeg was ever started.
+    /// </summary>
+    private async Task ContinueWithNextJobItemOrFinish()
+    {
+        // The window is closing (or closed): do not start another ffmpeg, and there is no
+        // window left to show a dialog on.
+        if (_isClosing)
+        {
+            return;
+        }
+
+        ProgressValue = 0;
+
+        if (_jobItemIndex < JobItems.Count - 1)
+        {
+            await InitAndStartJobItem(_jobItemIndex + 1);
+            return;
+        }
+
+        IsGenerating = false;
+
+        var jobItem = JobItems[_jobItemIndex];
+        if (JobItems.Count == 1 && jobItem.Status != StatusSkipped)
+        {
+            await _windowService.ShowDialogAsync<PromptFileSavedWindow, PromptFileSavedViewModel>(Window!, vm =>
+            {
+                vm.Initialize(
+                    Se.Language.General.VideoFileGenerated,
+                    string.Format(Se.Language.General.VideoFileGeneratedX, jobItem.OutputVideoFileName),
+                    jobItem.OutputVideoFileName,
+                    true,
+                    true);
+            });
+        }
+        else
+        {
+            var sb = new StringBuilder($"Generated files ({JobItems.Count}):" + Environment.NewLine + Environment.NewLine);
+            foreach (var item in JobItems)
+            {
+                sb.AppendLine($"{item.OutputVideoFileName} ==> {item.Status}");
+            }
+
+            await MessageBox.Show(Window!,
+                "Generating done",
+                sb.ToString(),
+                MessageBoxButtons.OK);
+        }
+    }
+
+    private static bool OutputFileHasContent(string fileName)
+    {
+        try
+        {
+            return File.Exists(fileName) && new FileInfo(fileName).Length > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private double GetProgressPercentage(BurnInJobItem jobItem)
+    {
+        // Guard the division: a zero frame total made the progress value NaN/Infinity.
+        if (jobItem.TotalFrames <= 0)
+        {
+            return 0;
+        }
+
+        return _processedFrames * 100.0 / jobItem.TotalFrames;
+    }
+
+    private async Task InitAndStartJobItem(int index)
+    {
+        _startTicks = DateTime.UtcNow.Ticks;
+        _jobItemIndex = index;
+        // The frame count of the previous batch item made the next one briefly show 100 %.
+        _processedFrames = 0;
+        var jobItem = JobItems[index];
+
+        // Transparent video is generated by ffmpeg from scratch (lavfi color source) - the input
+        // video file is not used, so dimensions come from UI and duration from the subtitle.
+        var subtitle = !string.IsNullOrWhiteSpace(jobItem.SubtitleFileName) && File.Exists(jobItem.SubtitleFileName)
+            ? Subtitle.Parse(jobItem.SubtitleFileName)
+            : null;
+
+        // Apply the cut before measuring: the generated video's duration comes from
+        // TotalSeconds, so measuring the untrimmed subtitle produced a full-length file
+        // with the cut range's text bunched at the start.
+        if (subtitle != null)
+        {
+            subtitle = GetSubtitleBasedOnCut(subtitle);
+        }
+
+        var totalMs = subtitle?.Paragraphs.Count > 0
+            ? subtitle.Paragraphs.Max(p => p.EndTime.TotalMilliseconds) + 2000
+            : 2000;
+
+        jobItem.Width = VideoWidth ?? 1920;
+        jobItem.Height = VideoHeight ?? 1080;
+        jobItem.TotalSeconds = totalMs / 1000.0;
+        jobItem.TotalFrames = (long)(SelectedFrameRate * jobItem.TotalSeconds);
+        jobItem.UseTargetFileSize = UseTargetFileSize;
+        jobItem.TargetFileSize = UseTargetFileSize ? TargetFileSize ?? 0 : 0;
+        jobItem.AssaSubtitleFileName = MakeAssa(jobItem.SubtitleFileName);
+        if (string.IsNullOrEmpty(jobItem.AssaSubtitleFileName))
+        {
+            // An unreadable subtitle file used to be marked "Skipped" and then encoded anyway,
+            // with an empty "subtitles=f=" file name that ffmpeg rejects - and that error ended
+            // the whole batch.
+            jobItem.Status = StatusSkipped;
+            Se.WriteToolsLog($"Transparent video: skipped - subtitle file \"{jobItem.SubtitleFileName}\" could not be read");
+            await ContinueWithNextJobItemOrFinish();
+            return;
+        }
+
+        jobItem.Status = Se.Language.General.Generating;
+
+        var outputBase = !string.IsNullOrWhiteSpace(jobItem.InputVideoFileName)
+            ? jobItem.InputVideoFileName
+            : jobItem.SubtitleFileName;
+        jobItem.OutputVideoFileName = MakeOutputFileName(outputBase);
+
+        var result = await RunEncoding(jobItem);
+        if (result)
+        {
+            _timerGenerate.Start();
+        }
+        else
+        {
+            // No process and no timer running (the "ffmpeg parameters" prompt was cancelled):
+            // nothing would ever reset the generating state, leaving Generate/OK disabled.
+            jobItem.Status = Se.Language.General.Error;
+            IsGenerating = false;
+            ProgressValue = 0;
+        }
+    }
+
+    private async Task<bool> RunEncoding(BurnInJobItem jobItem)
+    {
+        var process = await GetFfmpegProcess(jobItem);
+        if (process == null || _isClosing)
+        {
+            return false;
+        }
+
+        _ffmpegProcess = process;
+#pragma warning disable CA1416 // Validate platform compatibility
+        _ffmpegProcess.Start();
+#pragma warning restore CA1416 // Validate platform compatibility
+        _ffmpegProcess.BeginOutputReadLine();
+        _ffmpegProcess.BeginErrorReadLine();
+
+        return true;
+    }
+
+    private async Task<Process?> GetFfmpegProcess(BurnInJobItem jobItem)
+    {
+        var ts = TimeSpan.FromSeconds(jobItem.TotalSeconds);
+        // Use total hours so durations >= 24h are not silently wrapped by TimeSpan.Hours.
+        var timeCode = $"{(int)ts.TotalHours:00}\\\\:{ts.Minutes:00}\\\\:{ts.Seconds:00}";
+
+        var ffmpegParameters = FfmpegGenerator.GenerateTransparentVideoFile(
+            jobItem.AssaSubtitleFileName,
+            jobItem.OutputVideoFileName,
+            jobItem.Width,
+            jobItem.Height,
+            SelectedFrameRate.ToString(CultureInfo.InvariantCulture),
+            timeCode);
+
+        if (PromptForFfmpegParameters)
+        {
+            var result = await _windowService.ShowDialogAsync<PromptTextBoxWindow, PromptTextBoxViewModel>(Window!, vm =>
+            {
+                vm.Initialize("ffmpeg parameters", ffmpegParameters, 1000, 200);
+            });
+
+            if (!result.OkPressed || string.IsNullOrWhiteSpace(result.Text))
+            {
+                return null;
+            }
+
+            ffmpegParameters = result.Text.Trim();
+        }
+
+        var workingDirectory = Path.GetDirectoryName(jobItem.AssaSubtitleFileName) ?? string.Empty;
+        // Machine-readable progress on stdout ("frame=N" etc.) instead of scraping the
+        // human-readable stderr stats, which drift between ffmpeg versions.
+        ffmpegParameters = FfmpegProgressTracker.ProgressArguments + " " + ffmpegParameters;
+
+        return FfmpegGenerator.GetProcess(ffmpegParameters, OutputHandler, workingDirectory);
+    }
+
+    private Subtitle GetSubtitleBasedOnCut(Subtitle inputSubtitle)
+    {
+        if (!IsCutActive)
+        {
+            return inputSubtitle;
+        }
+
+        var subtitle = new Subtitle
+        {
+            Header = inputSubtitle.Header, // keep ASSA styles + PlayRes
+            Footer = inputSubtitle.Footer,
+        };
+
+        foreach (var p in inputSubtitle.Paragraphs)
+        {
+            if (p.EndTime.TotalMilliseconds > CutFrom.TotalMilliseconds &&
+                p.StartTime.TotalMilliseconds < CutTo.TotalMilliseconds)
+            {
+                var paragraph = new Paragraph(p);
+                paragraph.StartTime.TotalMilliseconds = Math.Max(paragraph.StartTime.TotalMilliseconds, CutFrom.TotalMilliseconds);
+                paragraph.EndTime.TotalMilliseconds = Math.Min(paragraph.EndTime.TotalMilliseconds, CutTo.TotalMilliseconds);
+                subtitle.Paragraphs.Add(paragraph);
+            }
+        }
+
+        subtitle.AddTimeToAllParagraphs(TimeSpan.FromMilliseconds(-CutFrom.TotalMilliseconds));
+
+        return subtitle;
+    }
+
+    private string GetValidationError()
+    {
+        if (Window == null)
+        {
+            return "Window is null";
+        }
+
+        if (FontFactor == null || FontFactor < 0.1)
+        {
+            return string.Format(Se.Language.General.PleaseEnterAValidValueForX, "Font factor");
+        }
+
+        if (SelectedFontOutline == null)
+        {
+            return string.Format(Se.Language.General.PleaseEnterAValidValueForX, "Font outline width");
+        }
+
+
+        if (SelectedFontShadowWidth == null)
+        {
+            return string.Format(Se.Language.General.PleaseEnterAValidValueForX, "Font shadow width");
+        }
+
+        if (FontMarginHorizontal == null)
+        {
+            return string.Format(Se.Language.General.PleaseEnterAValidValueForX, "Font margin horizontal");
+        }
+
+        if (FontMarginVertical == null)
+        {
+            return string.Format(Se.Language.General.PleaseEnterAValidValueForX, "Font margin vertical");
+        }
+
+        if (VideoWidth == null || VideoWidth <= 1)
+        {
+            return string.Format(Se.Language.General.PleaseEnterAValidValueForX, "Video width");
+        }
+
+        if (VideoHeight == null || VideoHeight <= 1)
+        {
+            return string.Format(Se.Language.General.PleaseEnterAValidValueForX, "Video height");
+        }
+
+        if (UseTargetFileSize)
+        {
+            if (TargetFileSize == null || TargetFileSize < 1)
+            {
+                return string.Format(Se.Language.General.PleaseEnterAValidValueForX, "Target file size");
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private void OutputHandler(object sendingProcess, DataReceivedEventArgs outLine)
+    {
+        if (string.IsNullOrWhiteSpace(outLine.Data))
+        {
+            return;
+        }
+
+        if (FfmpegProgressTracker.TryGetFrame(outLine.Data, out var frame))
+        {
+            _processedFrames = frame;
+            ProgressValue = GetProgressPercentage(JobItems[_jobItemIndex]);
+            return;
+        }
+
+        // Keep the twice-a-second "-progress" key/value spam out of the user-facing log.
+        if (FfmpegProgressTracker.IsProgressLine(outLine.Data))
+        {
+            return;
+        }
+
+        _log?.AppendLine(outLine.Data);
+    }
+
+    private ObservableCollection<BurnInJobItem> GetCurrentVideoAsJobItems()
+    {
+        var subtitle = new Subtitle(_subtitle);
+
+        // Tracked so the file is swept when the window closes - and not GetTempFileName() plus an
+        // extension, which leaked the empty tmpXXXX.tmp it creates on top of the file written
+        // (#13332).
+        var subtitleFileName = _subtitleFormat is { Name: AdvancedSubStationAlpha.NameOfFormat }
+            ? _tempSubtitleFiles.Write(subtitle, new AdvancedSubStationAlpha())
+            : _tempSubtitleFiles.Write(subtitle, new SubRip());
+
+        var jobItem = new BurnInJobItem(string.Empty, VideoWidth ?? 0, VideoHeight ?? 0)
+        {
+            InputVideoFileName = VideoFileName,
+            OutputVideoFileName = MakeOutputFileName(_subtitle.FileName),
+        };
+        jobItem.AddSubtitleFileName(subtitleFileName);
+
+        return new ObservableCollection<BurnInJobItem>(new[] { jobItem });
+    }
+
+    private string MakeAssa(string subtitleFileName)
+    {
+        if (string.IsNullOrWhiteSpace(subtitleFileName) || !File.Exists(subtitleFileName))
+        {
+            JobItems[_jobItemIndex].Status = StatusSkipped;
+            return string.Empty;
+        }
+
+        var isAssa = subtitleFileName.EndsWith(".ass", StringComparison.OrdinalIgnoreCase);
+
+        var subtitle = Subtitle.Parse(subtitleFileName);
+        if (subtitle == null)
+        {
+            JobItems[_jobItemIndex].Status = StatusSkipped;
+            return string.Empty;
+        }
+
+        subtitle = GetSubtitleBasedOnCut(subtitle);
+
+        if (subtitle.OriginalFormat is NetflixImsc11Japanese || NetflixImsc11JapaneseToAss.HasJapaneseMarkup(subtitle))
+        {
+            // Furigana, bouten and vertical writing become extra positioned render lines - the raw
+            // tags would otherwise be rendered as literal text (issue #13861). Lambda Cap decodes
+            // to the same markup (issue #14165).
+            var japaneseJobItem = JobItems[_jobItemIndex];
+            var japaneseAssaFileName = _tempSubtitleFiles.GetFileName(".ass");
+            File.WriteAllText(japaneseAssaFileName, NetflixImsc11JapaneseToAss.Convert(subtitle, japaneseJobItem.Width, japaneseJobItem.Height));
+            return japaneseAssaFileName;
+        }
+
+        if (!isAssa)
+        {
+            var jobItem = JobItems[_jobItemIndex];
+            var fontSize = CalculateFontSize(jobItem.Width, jobItem.Height, FontFactor ?? 0);
+            foreach (var s in subtitle.Paragraphs)
+            {
+                foreach (var effect in _selectedEffects)
+                {
+                    var durationMs = (int)s.Duration.TotalMilliseconds;
+                    s.Text = effect.ApplyEffect(s.Text, jobItem.Width, jobItem.Height, fontSize, durationMs);
+                }
+            }
+
+            SetStyleForNonAssa(subtitle, jobItem.Width, jobItem.Height);
+        }
+
+        return _tempSubtitleFiles.Write(subtitle, new AdvancedSubStationAlpha());
+    }
+
+    private void SetStyleForNonAssa(Subtitle sub, int width, int height)
+    {
+        sub.Header = AdvancedSubStationAlpha.DefaultHeader;
+        var style = AdvancedSubStationAlpha.GetSsaStyle("Default", sub.Header);
+        style.FontSize = CalculateFontSize(width, height, FontFactor ?? 0);
+        style.Bold = FontIsBold;
+        style.FontName = SelectedFontName;
+        style.Background = FontShadowColor.ToSKColor();
+        style.Primary = FontTextColor.ToSKColor();
+        style.Outline = FontOutlineColor.ToSKColor();
+        style.OutlineWidth = SelectedFontOutline ?? 0;
+        style.ShadowWidth = SelectedFontShadowWidth ?? 0;
+        style.Spacing = SelectedFontSpacing ?? 0;
+        style.Alignment = SelectedFontAlignment.Code;
+        style.MarginLeft = FontMarginHorizontal ?? 0;
+        style.MarginRight = FontMarginHorizontal ?? 0;
+        style.MarginVertical = FontMarginVertical ?? 0;
+
+        if (SelectedFontBoxType.BoxType == FontBoxType.None)
+        {
+            style.BorderStyle = "0"; // bo box
+        }
+        else if (SelectedFontBoxType.BoxType == FontBoxType.BoxPerLine)
+        {
+            style.BorderStyle = "3"; // box - per line
+        }
+        else
+        {
+            style.BorderStyle = "4"; // box - multi line
+        }
+
+        sub.Header =
+            AdvancedSubStationAlpha.GetHeaderAndStylesFromAdvancedSubStationAlpha(sub.Header,
+                new List<SsaStyle> { style });
+        sub.Header = AdvancedSubStationAlpha.AddTagToHeader("PlayResX",
+            "PlayResX: " + width.ToString(CultureInfo.InvariantCulture), "[Script Info]", sub.Header);
+        sub.Header = AdvancedSubStationAlpha.AddTagToHeader("PlayResY",
+            "PlayResY: " + height.ToString(CultureInfo.InvariantCulture), "[Script Info]", sub.Header);
+    }
+
+    private string MakeOutputFileName(string videoFileName)
+    {
+        var nameNoExt = Path.GetFileNameWithoutExtension(videoFileName);
+        var ext = SelectedVideoExtension;
+        // This dialog's own suffix ("_transparent"), which existed but was never read -
+        // transparent output was being named with burn-in's "_new".
+        var suffix = Se.Settings.Video.Transparent.OutputSuffix;
+
+        // This dialog's own output folder, not burn-in's. The settings window has always written
+        // Video.Transparent.OutputFolder / UseOutputFolder, but nothing read them - so whatever
+        // folder was picked here had no effect and the files went to the burn-in folder instead.
+        var transparent = Se.Settings.Video.Transparent;
+
+        // Directory.Exists belongs in the condition itself, not only at the first use: the
+        // collision loop below picks the folder again, and testing it in one place but not the
+        // other builds "<missing folder>/name_2.mp4" for the second file of a run and fails at
+        // write time. Falling back to the source folder is what the first check already does.
+        var useOutputFolder = transparent.UseOutputFolder &&
+                              !string.IsNullOrEmpty(transparent.OutputFolder) &&
+                              Directory.Exists(transparent.OutputFolder);
+
+        var fileName = Path.Combine(Path.GetDirectoryName(videoFileName)!, nameNoExt + suffix + ext);
+        if (useOutputFolder)
+        {
+            fileName = Path.Combine(transparent.OutputFolder, nameNoExt + suffix + ext);
+        }
+
+        var i = 2;
+        while (File.Exists(fileName))
+        {
+            if (useOutputFolder)
+            {
+                fileName = Path.Combine(transparent.OutputFolder, $"{nameNoExt}{suffix}_{i}{ext}");
+            }
+            else
+            {
+                fileName = Path.Combine(Path.GetDirectoryName(videoFileName) ?? Path.GetTempPath(), $"{nameNoExt}{suffix}_{i}{ext}");
+            }
+
+            i++;
+        }
+
+        return fileName;
+    }
+
+    public static int CalculateFontSize(int videoWidth, int videoHeight, double factor, int minSize = 8,
+        int maxSize = 2000)
+    {
+        factor = Math.Clamp(factor, 0, 1);
+
+        // Calculate the diagonal resolution
+        var diagonalResolution = Math.Sqrt(videoWidth * videoWidth + videoHeight * videoHeight);
+
+        // Calculate base size (when factor is 0.5)
+        var baseSize = diagonalResolution * 0.019; // around 2% of diagonal as base size
+
+        // Apply logarithmic scaling
+        var scaleFactor = Math.Pow(maxSize / baseSize, 2 * (factor - 0.5));
+        var fontSize = (int)Math.Round(baseSize * scaleFactor);
+
+        // Clamp the font size between minSize and maxSize
+        return Math.Clamp(fontSize, minSize, maxSize);
+    }
+
+    [RelayCommand]
+    private async Task PromptFfmpegParametersAndGeenrate()
+    {
+        if (Window == null)
+        {
+            return;
+        }
+
+        var msg = GetValidationError();
+        if (!string.IsNullOrEmpty(msg))
+        {
+            await MessageBox.Show(Window!, Se.Language.General.Error, msg, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        PromptForFfmpegParameters = true;
+        await Generate();
+        PromptForFfmpegParameters = false;
+    }
+
+
+    [RelayCommand]
+    private async Task Add()
+    {
+        var fileNames = await _fileHelper.PickOpenSubtitleFiles(Window!, Se.Language.General.OpenSubtitles);
+        if (fileNames.Length == 0)
+        {
+            return;
+        }
+
+        foreach (var fileName in fileNames)
+        {
+            var videoFileName = string.Empty;
+            var jobItem = new BurnInJobItem(videoFileName, VideoWidth ?? 0, VideoHeight ?? 0);
+            jobItem.AddSubtitleFileName(fileName);
+            Dispatcher.UIThread.Invoke(() => { JobItems.Add(jobItem); });
+        }
+    }
+
+    [RelayCommand]
+    private async Task OpenOutputFolder()
+    {
+        await _folderHelper.OpenFolder(Window!, Se.Settings.Video.Transparent.OutputFolder);
+    }
+
+    [RelayCommand]
+    private void Remove()
+    {
+        if (SelectedJobItem != null)
+        {
+            var idx = JobItems.IndexOf(SelectedJobItem);
+            JobItems.Remove(SelectedJobItem);
+        }
+    }
+
+    [RelayCommand]
+    private void Clear()
+    {
+        JobItems.Clear();
+    }
+
+    [RelayCommand]
+    private async Task PickVideoFile()
+    {
+        if (SelectedJobItem == null)
+        {
+            return;
+        }
+
+        var fileName = await _fileHelper.PickOpenVideoFile(Window!, "Open video file");
+        if (!string.IsNullOrEmpty(fileName))
+        {
+            SelectedJobItem.InputVideoFileName = fileName;
+            SelectedJobItem.InputVideoFileNameShort = Path.GetFileName(fileName);
+        }
+    }
+
+    [RelayCommand]
+    private async Task OutputProperties()
+    {
+        // This dialog's own settings window, not burn-in's: it reads and writes
+        // Video.Transparent.*, which is what MakeOutputFileName below actually uses.
+        // Opening the burn-in one edited a store nothing here reads and silently changed
+        // the burn-in dialog's output folder instead.
+        await _windowService.ShowDialogAsync<TransparentSettingsWindow, TransparentSettingsViewModel>(Window!);
+        UpdateOutputProperties();
+    }
+
+    [RelayCommand]
+    private async Task BrowseResolution()
+    {
+        // No "use source resolution" here: the video is generated from scratch, so there is no
+        // source video for it to refer to.
+        var result =
+            await _windowService
+                .ShowDialogAsync<BurnInResolutionPickerWindow, BurnInResolutionPickerViewModel>(Window!, vm =>
+                {
+                    vm.RemoveUseSourceResolution();
+                });
+        if (!result.OkPressed || result.SelectedResolution == null)
+        {
+            return;
+        }
+
+        if (result.SelectedResolution.ItemType == ResolutionItemType.PickResolution)
+        {
+            var videoFileName = await _fileHelper.PickOpenVideoFile(Window!, "Open video file");
+            if (string.IsNullOrWhiteSpace(videoFileName))
+            {
+                return;
+            }
+
+            var mediaInfo = FfmpegMediaInfo2.Parse(videoFileName);
+            VideoWidth = mediaInfo.Dimension.Width;
+            VideoHeight = mediaInfo.Dimension.Height;
+        }
+        else if (result.SelectedResolution.ItemType == ResolutionItemType.Resolution)
+        {
+            VideoWidth = result.SelectedResolution.Width;
+            VideoHeight = result.SelectedResolution.Height;
+        }
+
+        SaveSettings();
+    }
+
+    [RelayCommand]
+    private async Task BrowseCutFrom()
+    {
+        var result =
+            await _windowService.ShowDialogAsync<SelectVideoPositionWindow, SelectVideoPositionViewModel>(Window!,
+                vm => { vm.Initialize(VideoFileName); });
+
+        if (!result.OkPressed)
+        {
+            return;
+        }
+
+        CutFrom = TimeSpan.FromSeconds((long)Math.Round(result.PositionInSeconds, MidpointRounding.AwayFromZero));
+    }
+
+    [RelayCommand]
+    private async Task BrowseCutTo()
+    {
+        var result =
+            await _windowService.ShowDialogAsync<SelectVideoPositionWindow, SelectVideoPositionViewModel>(Window!,
+                vm => { vm.Initialize(VideoFileName); });
+
+        if (!result.OkPressed)
+        {
+            return;
+        }
+
+        CutTo = TimeSpan.FromSeconds((long)Math.Round(result.PositionInSeconds, MidpointRounding.AwayFromZero));
+    }
+
+    [RelayCommand]
+    private async Task Generate()
+    {
+        if (Window == null)
+        {
+            return;
+        }
+
+        var msg = GetValidationError();
+        if (!string.IsNullOrEmpty(msg))
+        {
+            await MessageBox.Show(Window, Se.Language.General.Error, msg, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        if (IsCutActive && CutFrom >= CutTo)
+        {
+            await MessageBox.Show(Window!,
+                "Cut settings error",
+                "Cut end time must be after cut start time",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+
+            return;
+        }
+
+        if (!IsBatchMode)
+        {
+            JobItems = GetCurrentVideoAsJobItems();
+        }
+
+        if (IsBatchMode && JobItems.Count == 0)
+        {
+            await Add();
+
+            if (IsBatchMode && JobItems.Count == 0)
+            {
+                return;
+            }
+        }
+
+        if (JobItems.Count == 0)
+        {
+            return;
+        }
+
+        // check that all jobs have subtitles
+        foreach (var jobItem in JobItems)
+        {
+            if (string.IsNullOrWhiteSpace(jobItem.SubtitleFileName))
+            {
+                await MessageBox.Show(Window!,
+                    "Missing subtitle",
+                    "Please add a subtitle to all batch items",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+
+                return;
+            }
+        }
+
+        _doAbort = false;
+        _log.Clear();
+        IsGenerating = true;
+        _processedFrames = 0;
+        ProgressValue = 0;
+        SaveSettings();
+
+        await InitAndStartJobItem(0);
+    }
+
+    private void LoadSettings()
+    {
+        var settings = Se.Settings.Video.BurnIn;
+        FontFactor = settings.FontFactor;
+        FontIsBold = settings.FontBold;
+        SelectedFontOutline = settings.OutlineWidth;
+        SelectedFontShadowWidth = settings.ShadowWidth;
+        SelectedFontSpacing = settings.NonAssaSpacing;
+        // Guard the fallback the way the constructor does: assigning a font that is not
+        // in FontNames nulls the ComboBox selection, and the TwoWay binding then writes
+        // that null back over the saved font name.
+        SelectedFontName = FontNames.FirstOrDefault(p => p == settings.FontName) ?? FontNames[0];
+        FontTextColor = settings.NonAssaTextColor.FromHexToColor();
+        FontOutlineColor = settings.NonAssaOutlineColor.FromHexToColor();
+        FontBoxColor = settings.NonAssaBoxColor.FromHexToColor();
+        FontShadowColor = settings.NonAssaShadowColor.FromHexToColor();
+        FontFixRtl = settings.NonAssaFixRtlUnicode;
+        SelectedFontAlignment = FontAlignments.First(p => p.Code == settings.NonAssaAlignment);
+        OutputFolder = settings.OutputFolder;
+        UseOutputFolderVisible = settings.UseOutputFolder;
+        UseSourceFolderVisible = !settings.UseOutputFolder;
+
+        // Burn-in's "use source resolution" is deliberately not loaded (or saved): there is no
+        // source video here, so it hid the width/height boxes while the video was still generated
+        // at those values - and saving it back switched the burn-in dialog's setting off.
+        UseSourceResolution = false;
+
+        var effectsAsStringArray = settings.Effects?.Split(',') ?? [];
+        _selectedEffects = BurnInEffectItem.List().Where(p => effectsAsStringArray.Contains(p.Name)).ToList();
+        _previewDirty = true;
+        DisplayEffect = string.Join(", ", _selectedEffects.Select(p => p.Name));
+
+        // The frame rate is a real encoding parameter and the extension picks the container, but
+        // neither was ever loaded or saved, so both reset to the default on every reopen.
+        var transparent = Se.Settings.Video.Transparent;
+        if (FrameRates.Contains(transparent.FrameRate))
+        {
+            SelectedFrameRate = transparent.FrameRate;
+        }
+
+        SelectedVideoExtension = VideoExtensions.FirstOrDefault(p => p == settings.GenTransparentVideoExtension)
+                                 ?? VideoExtensions[0];
+    }
+
+    private void SaveSettings()
+    {
+        var settings = Se.Settings.Video.BurnIn;
+        settings.FontFactor = FontFactor ?? 0;
+        settings.FontBold = FontIsBold;
+        settings.OutlineWidth = SelectedFontOutline ?? 0;
+        settings.ShadowWidth = SelectedFontShadowWidth ?? 0;
+        settings.NonAssaSpacing = SelectedFontSpacing ?? 0;
+        settings.FontName = SelectedFontName;
+        settings.NonAssaTextColor = FontTextColor.FromColorToHex();
+        settings.NonAssaOutlineColor = FontOutlineColor.FromColorToHex();
+        settings.NonAssaBoxColor = FontBoxColor.FromColorToHex();
+        settings.NonAssaShadowColor = FontShadowColor.FromColorToHex();
+        settings.NonAssaFixRtlUnicode = FontFixRtl;
+        settings.NonAssaAlignment = SelectedFontAlignment.Code;
+        settings.GenTransparentVideoExtension = SelectedVideoExtension;
+        Se.Settings.Video.Transparent.FrameRate = SelectedFrameRate;
+
+        Se.SaveSettings();
+    }
+
+    [RelayCommand]
+    private void SingleMode()
+    {
+        IsBatchMode = false;
+        IsSingleModeVisible = false;
+        UpdateNonAssaPreview();
+    }
+
+    [RelayCommand]
+    private void BatchMode()
+    {
+        IsBatchMode = true;
+        IsSingleModeVisible = !string.IsNullOrEmpty(_inputVideoFileName);
+        UpdateNonAssaPreview();
+    }
+
+    [RelayCommand]
+    private void Ok()
+    {
+        OkPressed = true;
+        Window?.Close();
+    }
+
+    [RelayCommand]
+    private void Cancel()
+    {
+        if (IsGenerating)
+        {
+            _doAbort = true;
+            return;
+        }
+
+        Window?.Close();
+    }
+
+    [RelayCommand]
+    private async Task ShowEffects()
+    {
+        var result = await _windowService.ShowDialogAsync<BurnInEffectWindow, BurnInEffectViewModel>(Window!, vm =>
+        {
+            vm.Initialize(VideoFileName, _selectedEffects);
+        });
+
+        if (!result.OkPressed)
+        {
+            return;
+        }
+
+        _selectedEffects = result.SelectedEffects.ToList();
+
+        _previewDirty = true;
+        DisplayEffect = string.Join(", ", _selectedEffects.Select(p => p.Name));
+    }
+
+    internal void OnKeyDown(KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape)
+        {
+            e.Handled = true;
+            // Route through Cancel so Escape during generation aborts the encode
+            // instead of closing the window over a running ffmpeg.
+            Cancel();
+        }
+        else if (UiUtil.IsHelp(e))
+        {
+            e.Handled = true;
+            UiUtil.ShowHelp("features/transparent-subtitles");
+        }
+    }
+
+    private static string TryGetSubtitleFileName(string fileName)
+    {
+        var srt = Path.ChangeExtension(fileName, ".srt");
+        if (File.Exists(srt))
+        {
+            return srt;
+        }
+
+        var assa = Path.ChangeExtension(fileName, ".ass");
+        if (File.Exists(assa))
+        {
+            return assa;
+        }
+
+        var dir = Path.GetDirectoryName(fileName);
+        if (string.IsNullOrEmpty(dir))
+        {
+            return string.Empty;
+        }
+
+        var searchPath = Path.GetFileNameWithoutExtension(fileName);
+        var files = Directory.GetFiles(dir, searchPath + "*");
+        var subtitleExtensions = SubtitleFormat.AllSubtitleFormats.Select(p => p.Extension).Distinct();
+        foreach (var ext in subtitleExtensions)
+        {
+            foreach (var file in files)
+            {
+                if (file.EndsWith(ext, StringComparison.InvariantCultureIgnoreCase))
+                {
+                    return file;
+                }
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private void UpdateOutputProperties()
+    {
+        // This dialog's own output-folder settings: the settings window and
+        // MakeOutputFileName both read/write Video.Transparent.*, so the UI has to read
+        // the same store or it shows a folder that has no effect on the output.
+        if (Se.Settings.Video.Transparent.UseOutputFolder &&
+            string.IsNullOrWhiteSpace(Se.Settings.Video.Transparent.OutputFolder))
+        {
+            // Output-folder mode is on but no folder is configured - fall back to the source folder.
+            Se.Settings.Video.Transparent.UseOutputFolder = false;
+        }
+
+        UseSourceFolderVisible = !Se.Settings.Video.Transparent.UseOutputFolder;
+        UseOutputFolderVisible = Se.Settings.Video.Transparent.UseOutputFolder;
+        OutputFolder = Se.Settings.Video.Transparent.OutputFolder;
+    }
+
+    public void BoxTypeChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        BoxTypeChanged();
+    }
+
+    private void BoxTypeChanged()
+    {
+        if (SelectedFontBoxType.BoxType == FontBoxType.None)
+        {
+            FontOutlineText = Se.Language.General.Outline;
+            FontShadowText = Se.Language.General.Shadow; 
+        }
+
+        if (SelectedFontBoxType.BoxType == FontBoxType.OneBox)
+        {
+            FontOutlineText = Se.Language.General.Outline;
+            FontShadowText = Se.Language.General.Box;
+        }
+
+        if (SelectedFontBoxType.BoxType == FontBoxType.BoxPerLine)
+        {
+            FontOutlineText = Se.Language.General.Box;
+            FontShadowText = Se.Language.General.Shadow; 
+        }
+
+        UpdateNonAssaPreview();
+    }
+
+    private int _previewRequestId;
+
+    private void UpdateNonAssaPreview()
+    {
+        if (_loading || Window == null || !string.IsNullOrEmpty(GetValidationError()))
+        {
+            return;
+        }
+
+        if (_subtitleFormat is { Name: AdvancedSubStationAlpha.NameOfFormat } && !IsBatchMode)
+        {
+            ImagePreview = new SKBitmap(1, 1).ToAvaloniaBitmap();
+            return;
+        }
+
+        // Render the preview with ffmpeg/libass (same engine as the generated video), debounced
+        // as the numeric up/downs fire on every tick. Falls back to the Skia approximation if
+        // ffmpeg is unavailable.
+        var requestId = System.Threading.Interlocked.Increment(ref _previewRequestId);
+        var width = VideoWidth ?? 0;
+        var height = VideoHeight ?? 0;
+        if (width < 16 || height < 16)
+        {
+            width = 1920;
+            height = 1080;
+        }
+
+        Task.Run(async () =>
+        {
+            await Task.Delay(150);
+            if (requestId != _previewRequestId)
+            {
+                return;
+            }
+
+            var previewSubtitle = new Subtitle();
+            previewSubtitle.Paragraphs.Add(new Paragraph("This is a test", 0, 2000));
+            SetStyleForNonAssa(previewSubtitle, width, height);
+
+            SKBitmap? bitmap = null;
+            try
+            {
+                bitmap = NonAssaPreviewRenderer.Render(previewSubtitle, width, height);
+            }
+            catch
+            {
+                // Fall back to the Skia preview below
+            }
+
+            if (requestId != _previewRequestId)
+            {
+                bitmap?.Dispose();
+                return;
+            }
+
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (requestId != _previewRequestId)
+                {
+                    bitmap?.Dispose();
+                    return;
+                }
+
+                if (bitmap != null)
+                {
+                    ImagePreview = bitmap.CropTransparentColors().ToAvaloniaBitmap();
+                }
+                else
+                {
+                    UpdateNonAssaPreviewSkia();
+                }
+            });
+        });
+    }
+
+    private void UpdateNonAssaPreviewSkia()
+    {
+        var text = "This is a test";
+
+
+        var fontSize = (float)CalculateFontSize(VideoWidth ?? 0, VideoHeight ?? 0, FontFactor ?? 0);
+        SKBitmap bitmap;
+
+        if (SelectedFontBoxType.BoxType == FontBoxType.BoxPerLine)
+        {
+            bitmap = TextToImageGenerator.GenerateImageWithPadding(
+                text,
+                SelectedFontName,
+                fontSize,
+                FontIsBold,
+                FontTextColor.ToSKColor(),
+                FontShadowColor.ToSKColor(),
+                FontOutlineColor.ToSKColor(),
+                FontOutlineColor.ToSKColor(),
+                0,
+                (float)(SelectedFontShadowWidth ?? 0));
+
+            if (SelectedFontShadowWidth > 0)
+            {
+                bitmap = TextToImageGenerator.AddShadowToBitmap(bitmap,
+                    (int)Math.Round(SelectedFontShadowWidth ?? 0, MidpointRounding.AwayFromZero),
+                    FontShadowColor.ToSKColor());
+            }
+        }
+        else if (SelectedFontBoxType.BoxType == FontBoxType.OneBox)
+        {
+            bitmap = TextToImageGenerator.GenerateImageWithPadding(
+                text,
+                SelectedFontName,
+                fontSize,
+                FontIsBold,
+                FontTextColor.ToSKColor(),
+                FontOutlineColor.ToSKColor(),
+                FontShadowColor.ToSKColor(),
+                FontShadowColor.ToSKColor(),
+                (float)(SelectedFontOutline ?? 0),
+                0,
+                1.0f,
+                (int)Math.Round(SelectedFontShadowWidth ?? 0));
+        }
+        else // FontBoxType.None
+        {
+            bitmap = TextToImageGenerator.GenerateImageWithPadding(
+                text,
+                SelectedFontName,
+                fontSize,
+                FontIsBold,
+                FontTextColor.ToSKColor(),
+                FontOutlineColor.ToSKColor(),
+                FontShadowColor.ToSKColor(),
+                SKColors.Transparent,
+                (float)(SelectedFontOutline ?? 0),
+                (float)(SelectedFontShadowWidth ?? 0));
+        }
+
+        ImagePreview = bitmap.ToAvaloniaBitmap();
+    }
+
+    partial void OnFontTextColorChanged(Color value) => UpdateNonAssaPreview();
+    partial void OnFontOutlineColorChanged(Color value) => UpdateNonAssaPreview();
+    partial void OnFontShadowColorChanged(Color value) => UpdateNonAssaPreview();
+
+    internal void Loaded()
+    {
+        Dispatcher.UIThread.Post(LoadVideoPreview);
+    }
+
+    /// <summary>
+    /// Builds the ASSA text for the live preview from the current style/effect settings.
+    /// This mirrors <see cref="MakeAssa"/> but is independent of the job pipeline
+    /// so it can run while the user is still tweaking settings.
+    /// </summary>
+    private string? GeneratePreviewAssaText()
+    {
+        if (_subtitle.Paragraphs.Count == 0)
+        {
+            return null;
+        }
+
+        var width = VideoWidth ?? 1920;
+        var height = VideoHeight ?? 1080;
+
+        var subtitle = new Subtitle(_subtitle, false);
+        if (_subtitleFormat is NetflixImsc11Japanese || NetflixImsc11JapaneseToAss.HasJapaneseMarkup(subtitle))
+        {
+            return NetflixImsc11JapaneseToAss.Convert(subtitle, width, height);
+        }
+
+        var isAssa = _subtitleFormat is { Name: AdvancedSubStationAlpha.NameOfFormat };
+        if (!isAssa)
+        {
+            var fontSize = CalculateFontSize(width, height, FontFactor ?? 0);
+            foreach (var s in subtitle.Paragraphs)
+            {
+                foreach (var effect in _selectedEffects)
+                {
+                    var durationMs = (int)s.Duration.TotalMilliseconds;
+                    s.Text = effect.ApplyEffect(s.Text, width, height, fontSize, durationMs);
+                }
+            }
+
+            SetStyleForNonAssa(subtitle, width, height);
+        }
+
+        var assa = new AdvancedSubStationAlpha();
+        return assa.ToText(subtitle, string.Empty);
+    }
+
+    private async void LoadVideoPreview()
+    {
+        if (VideoPlayerControl == null ||
+            string.IsNullOrWhiteSpace(VideoFileName) ||
+            !File.Exists(VideoFileName))
+        {
+            return;
+        }
+
+        try
+        {
+            await VideoPlayerControl.Open(VideoFileName);
+            await VideoPlayerControl.WaitForPlayersReadyAsync();
+            SetActivePreviewPlayer(VideoPlayerControl.VideoPlayer as LibMpvDynamicPlayer, alreadyHasSubtitle: false);
+
+            // Seek to the first subtitle so the user immediately sees styled text.
+            if (_subtitle.Paragraphs.Count > 0)
+            {
+                VideoPlayerControl.SetPosition(_subtitle.Paragraphs[0].StartTime.TotalSeconds + 0.05);
+            }
+
+            StartPreviewTimer();
+        }
+        catch (Exception exception)
+        {
+            Se.LogError(exception, "Failed to start transparent-video preview");
+        }
+    }
+
+    private void StartPreviewTimer()
+    {
+        _previewTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+        _previewTimer.Tick += (_, _) =>
+        {
+            if (_mpvPreviewPlayer == null || _loading)
+            {
+                return;
+            }
+
+            if (!_previewDirty)
+            {
+                return;
+            }
+
+            _previewDirty = false;
+
+            string? assaText;
+            try
+            {
+                assaText = GeneratePreviewAssaText();
+            }
+            catch
+            {
+                _previewDirty = true;
+                return; // ignore transient errors while the user is editing settings
+            }
+
+            if (string.IsNullOrEmpty(assaText) || assaText == _oldPreviewAssa)
+            {
+                return;
+            }
+
+            _oldPreviewAssa = assaText;
+            File.WriteAllText(_tempPreviewAssaFileName, assaText);
+            if (!_isPreviewSubtitleLoaded)
+            {
+                _isPreviewSubtitleLoaded = true;
+                _mpvPreviewPlayer.SubAdd(_tempPreviewAssaFileName);
+            }
+            else
+            {
+                _mpvPreviewPlayer.SubReload();
+            }
+        };
+        _previewTimer.Start();
+    }
+
+    /// <summary>
+    /// Points the live-preview timer at a specific mpv player (the embedded one or the
+    /// fullscreen one). Forces a refresh on the next tick so the styled subtitle is
+    /// (re)applied to the now-active player.
+    /// </summary>
+    private void SetActivePreviewPlayer(LibMpvDynamicPlayer? mpv, bool alreadyHasSubtitle)
+    {
+        _mpvPreviewPlayer = mpv;
+        _isPreviewSubtitleLoaded = alreadyHasSubtitle;
+        _oldPreviewAssa = string.Empty;
+        _previewDirty = true;
+    }
+
+    /// <summary>
+    /// Any view-model property may feed the styled preview (font, colors, margins, effects,
+    /// video size, subtitle format ...), so every change marks it dirty except the pure
+    /// output/progress properties that the generate/analyze timers write themselves.
+    /// </summary>
+    protected override void OnPropertyChanged(PropertyChangedEventArgs e)
+    {
+        base.OnPropertyChanged(e);
+
+        if (!PreviewNeutralProperties.Contains(e.PropertyName ?? string.Empty))
+        {
+            _previewDirty = true;
+        }
+    }
+
+    private static readonly HashSet<string> PreviewNeutralProperties =
+    [
+        nameof(ProgressText),
+        nameof(ProgressValue),
+        nameof(IsGenerating),
+        nameof(ImagePreview),
+        nameof(SelectedJobItem),
+        nameof(JobItems),
+        nameof(VideoFileSize),
+    ];
+
+    [RelayCommand]
+    private void PreviewFullScreen()
+    {
+        var control = VideoPlayerControl;
+        if (control == null || control.IsFullScreen ||
+            string.IsNullOrWhiteSpace(VideoFileName) || !File.Exists(VideoFileName) ||
+            _fullScreenVideoPlayerControl != null)
+        {
+            return;
+        }
+
+        control.VideoPlayer.Pause();
+        var position = control.Position;
+        var volume = control.Volume;
+
+        // Mirror the main window: use a separate fullscreen player rather than
+        // reparenting the embedded one (avoids airspace/reparent issues).
+        _fullScreenVideoPlayerControl = InitVideoPlayer.MakeVideoPlayer();
+        _fullScreenVideoPlayerControl.IsFullScreen = true;
+
+        var fullScreenWindow = new FullScreenVideoWindow(
+            _fullScreenVideoPlayerControl,
+            VideoFileName,
+            string.Empty,
+            position,
+            volume,
+            () =>
+            {
+                var fs = _fullScreenVideoPlayerControl;
+                _fullScreenVideoPlayerControl = null;
+                if (fs != null)
+                {
+                    control.SetPosition(fs.Position);
+                }
+
+                // The embedded player kept its file + subtitle loaded, so reload (not re-add).
+                SetActivePreviewPlayer(control.VideoPlayer as LibMpvDynamicPlayer, alreadyHasSubtitle: true);
+            });
+        fullScreenWindow.Show(Window!);
+
+        // Once the fullscreen player has opened the file, route the preview to it so
+        // style/effect changes keep updating live while fullscreen.
+        var fsControl = _fullScreenVideoPlayerControl;
+        Dispatcher.UIThread.Post(async () =>
+        {
+            await fsControl.WaitForPlayersReadyAsync();
+            if (_fullScreenVideoPlayerControl == fsControl) // still fullscreen (not closed in the meantime)
+            {
+                SetActivePreviewPlayer(fsControl.VideoPlayer as LibMpvDynamicPlayer, alreadyHasSubtitle: false);
+            }
+        });
+    }
+
+    internal void OnClosing()
+    {
+        // Stop the poll timers and any still-running encode - closing the window (title bar X)
+        // used to leave the ffmpeg process encoding to completion in the background, and in
+        // batch mode the timer went on to start the remaining jobs and then tried to show the
+        // "done" dialog on the closed window.
+        _isClosing = true;
+        _doAbort = true;
+        _timerGenerate.StopAndDispose(TimerGenerateElapsed);
+        _timerAnalyze.StopAndDispose(TimerAnalyzeElapsed);
+        if (_ffmpegProcess != null)
+        {
+            try
+            {
+                if (!_ffmpegProcess.HasExited)
+                {
+#pragma warning disable CA1416
+                    _ffmpegProcess.Kill(true);
+#pragma warning restore CA1416
+                }
+            }
+            catch
+            {
+                // ignore - it may have exited in between, or never started
+            }
+        }
+
+        CleanupPreview();
+    }
+
+    public void CleanupPreview()
+    {
+        // The subtitle files handed to ffmpeg live as long as the window does - nothing else
+        // removes them, and they used to pile up in the temp folder run after run (#13332).
+        _tempSubtitleFiles.Delete();
+
+        _previewTimer?.Stop();
+        _previewTimer = null;
+        _mpvPreviewPlayer = null;
+
+        try
+        {
+            VideoPlayerControl?.CloseAndDisposePlayer();
+        }
+        catch
+        {
+            // ignore
+        }
+
+        try
+        {
+            if (File.Exists(_tempPreviewAssaFileName))
+            {
+                File.Delete(_tempPreviewAssaFileName);
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+    }
+
+    internal void ComboBoxChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        UpdateNonAssaPreview();
+    }
+
+    internal void NumericUpDownChanged(object? sender, NumericUpDownValueChangedEventArgs e)
+    {
+        UpdateNonAssaPreview();
+    }
+
+    internal void CheckBoxChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        UpdateNonAssaPreview();
+    }
+
+    internal void TextBoxChanged(object? sender, TextChangedEventArgs e)
+    {
+        UpdateNonAssaPreview();
+    }
+}

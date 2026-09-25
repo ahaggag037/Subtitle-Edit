@@ -1,0 +1,190 @@
+using System.Reflection;
+using Nikse.SubtitleEdit.UiLogic.Export;
+using SkiaSharp;
+
+namespace SeConv.Core;
+
+/// <summary>
+/// Resolved styling for text → image rendering (Blu-Ray sup, VobSub, BDN-XML, ...).
+/// Values are resolved in this order: defaults below, then the <c>exportImages</c>
+/// section of a <c>--settings</c> JSON file (base section first, then the selected
+/// profile's overlay), then individual CLI flags (<c>--font-name</c>, ...).
+/// Defaults match seconv's original hardcoded rendering (Arial 50, white text,
+/// black outline, no box).
+/// </summary>
+internal sealed class ImageExportStyle
+{
+    public string FontName { get; set; } = "Arial";
+    public float FontSize { get; set; } = 50;
+    public SKColor FontColor { get; set; } = SKColors.White;
+    public bool IsBold { get; set; }
+    public SKColor OutlineColor { get; set; } = SKColors.Black;
+    public double OutlineWidth { get; set; } = 2.5;
+    public SKColor ShadowColor { get; set; } = SKColors.Black;
+    public double ShadowWidth { get; set; }
+    public SKColor BackgroundColor { get; set; } = SKColors.Transparent;
+    public double BackgroundCornerRadius { get; set; }
+
+    /// <summary>
+    /// Null = auto: a visible <see cref="BackgroundColor"/> turns on <see cref="ExportBoxType.OneBox"/>,
+    /// otherwise no box. Setting a background colour without a box type would silently
+    /// render nothing, so the auto rule keeps "--background-color black" working alone.
+    /// </summary>
+    public ExportBoxType? BoxType { get; set; }
+
+    public int BoxPaddingLeft { get; set; } = 5;
+    public int BoxPaddingRight { get; set; } = 5;
+    public int BoxPaddingTop { get; set; } = 3;
+    public int BoxPaddingBottom { get; set; } = 3;
+
+    /// <summary>Extra gap between lines as percent of line height. 0 = single spacing (matches the GUI export default).</summary>
+    public int LineSpacingPercent { get; set; }
+
+    /// <summary>
+    /// Draw each subtitle onto a frame-sized canvas instead of a bitmap cropped to the text,
+    /// so every image can be placed at 0,0 in an editing timeline. Only the FCP and Blu-Ray sup
+    /// handlers act on it (<see cref="FullFrameImage"/>); the other image formats ignore it.
+    /// </summary>
+    public bool IsFullFrame { get; set; }
+
+    /// <summary>
+    /// Background of the frame-sized image made when <see cref="IsFullFrame"/> is set. Separate
+    /// from <see cref="BackgroundColor"/>, which is the box behind the text - transparent by
+    /// default, because the images normally go on a track above the video.
+    /// </summary>
+    public SKColor FullFrameBackgroundColor { get; set; } = SKColors.Transparent;
+
+    /// <summary>
+    /// Draw each subtitle for a frame-packed 3D video, once per eye (<see cref="Stereo3DImage"/>).
+    /// Applies to text → image and image → image alike; D-Cinema has no packed frame and ignores it.
+    /// </summary>
+    public Export3DMode Mode3D { get; set; }
+
+    /// <summary>
+    /// Pixels the two eyes' copies are moved apart - positive brings the subtitle out of the
+    /// screen. D-Cinema writes it as the image's Z-position instead.
+    /// </summary>
+    public int Depth3D { get; set; }
+
+    /// <summary>
+    /// A 3D Blu-ray's depth for every frame: each subtitle gets the depth of the frames it is shown
+    /// on, and <see cref="Depth3D"/> is used where the 3D-Plane has none. Needs a 3D mode.
+    /// </summary>
+    public Stereo3DPlane? Plane3D { get; set; }
+
+    public static bool IsValidDepth3D(int depth)
+    {
+        return depth is >= Stereo3DImage.MinDepth and <= Stereo3DImage.MaxDepth;
+    }
+
+    public ExportAlignment Alignment { get; set; } = ExportAlignment.BottomCenter;
+    public ExportContentAlignment ContentAlignment { get; set; } = ExportContentAlignment.Center;
+
+    /// <summary>Vertical screen-edge margin in pixels. Null = 5% of screen height.</summary>
+    public int? BottomTopMargin { get; set; }
+
+    /// <summary>Horizontal screen-edge margin in pixels. Null = 5% of screen width.</summary>
+    public int? LeftRightMargin { get; set; }
+
+    /// <summary>
+    /// Image → image only (DVB-sub, PGS, VobSub pass-through): discard the source bitmap's
+    /// horizontal position and place it from <see cref="Alignment"/> + <see cref="LeftRightMargin"/>.
+    /// Matches SE4's "override original X position" transport-stream setting.
+    /// </summary>
+    public bool OverridePositionX { get; set; }
+
+    /// <summary>
+    /// Image → image only: discard the source bitmap's vertical position and place it from
+    /// <see cref="Alignment"/> + <see cref="BottomTopMargin"/>. Matches SE4's "override original Y position".
+    /// </summary>
+    public bool OverridePositionY { get; set; }
+
+    public ExportBoxType EffectiveBoxType =>
+        BoxType ?? (BackgroundColor.Alpha > 0 ? ExportBoxType.OneBox : ExportBoxType.None);
+
+    /// <summary>
+    /// Parses a colour from hex (<c>#AARRGGBB</c>, <c>#RRGGBB</c>, <c>#RGB</c>, with or
+    /// without <c>#</c>) or a named SkiaSharp colour (<c>white</c>, <c>black</c>, ...).
+    /// </summary>
+    public static bool TryParseColor(string value, out SKColor color)
+    {
+        color = SKColors.Transparent;
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var v = value.Trim();
+        if (SKColor.TryParse(v, out color))
+        {
+            return true;
+        }
+
+        var field = typeof(SKColors)
+            .GetFields(BindingFlags.Public | BindingFlags.Static)
+            .FirstOrDefault(f => f.FieldType == typeof(SKColor) &&
+                                 f.Name.Equals(v, StringComparison.OrdinalIgnoreCase));
+        if (field != null)
+        {
+            color = (SKColor)field.GetValue(null)!;
+            return true;
+        }
+
+        return false;
+    }
+
+    public static bool TryParseBoxType(string value, out ExportBoxType boxType)
+    {
+        boxType = ExportBoxType.None;
+        return Enum.TryParse(Normalize(value), ignoreCase: true, out boxType) && Enum.IsDefined(boxType);
+    }
+
+    public static bool TryParseAlignment(string value, out ExportAlignment alignment)
+    {
+        alignment = ExportAlignment.BottomCenter;
+        return Enum.TryParse(Normalize(value), ignoreCase: true, out alignment) && Enum.IsDefined(alignment);
+    }
+
+    public static bool TryParseContentAlignment(string value, out ExportContentAlignment alignment)
+    {
+        alignment = ExportContentAlignment.Center;
+        return Enum.TryParse(Normalize(value), ignoreCase: true, out alignment) && Enum.IsDefined(alignment);
+    }
+
+    /// <summary>
+    /// <c>none</c>, <c>half-side-by-side</c> (also <c>sbs</c>, <c>half-sbs</c>) or
+    /// <c>half-top-bottom</c> (also <c>tb</c>, <c>tab</c>, <c>half-tab</c>, <c>half-ou</c>).
+    /// </summary>
+    public static bool TryParseMode3D(string value, out Export3DMode mode)
+    {
+        mode = Export3DMode.None;
+        var normalized = Normalize(value).Replace("/", string.Empty).ToLowerInvariant();
+        switch (normalized)
+        {
+            case "sbs":
+            case "halfsbs":
+            case "hsbs":
+            case "sidebyside":
+                mode = Export3DMode.HalfSideBySide;
+                return true;
+            case "tb":
+            case "tab":
+            case "halftb":
+            case "halftab":
+            case "htab":
+            case "ou":
+            case "halfou":
+            case "topbottom":
+                mode = Export3DMode.HalfTopBottom;
+                return true;
+        }
+
+        return Enum.TryParse(normalized, ignoreCase: true, out mode) && Enum.IsDefined(mode);
+    }
+
+    // Accept "box-per-line" / "box_per_line" / "BoxPerLine" alike.
+    private static string Normalize(string value)
+    {
+        return value.Trim().Replace("-", string.Empty).Replace("_", string.Empty);
+    }
+}

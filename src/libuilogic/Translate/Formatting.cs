@@ -1,0 +1,349 @@
+﻿using Nikse.SubtitleEdit.Core.Common;
+using System;
+using System.Collections.Generic;
+using System.Text;
+using System.Text.RegularExpressions;
+
+namespace Nikse.SubtitleEdit.UiLogic.Translate
+{
+    public class Formatting
+    {
+        public static readonly List<string> LanguagesAllowingLineMerging = new List<string>
+        {
+            "en", "eng_Latn",
+            "da", "dan_Latn",
+            "nl", "nld_Latn",
+            "de", "deu_Latn",
+            "sv", "swe_Latn",
+            "nb", "nob_Latn",
+            "fr", "fra_Latn",
+            "it", "ita_Latn",
+            "tr", "tur_Latn",
+            "es", "spa_Latn",
+            "pt", "por_Latn",
+            "sr", "srp_Cyrl",
+            "ru", "rus_Cyrl",
+            "lv", "lvs_Latn",
+            "lt", "lit_Latn",
+            "et", "est_Latn",
+            "ro", "ron_Latn",
+            "pl", "pol_Latn",
+            "ar", "arb_Arab",
+            "he", "heb_Hebr",
+            "no", "nno_Latn",
+            "eu", "eus_Latn"
+        };
+
+        // Contains() on the 44-entry list ran per translated line.
+        private static readonly HashSet<string> LanguagesAllowingLineMergingSet = new HashSet<string>(LanguagesAllowingLineMerging, StringComparer.Ordinal);
+
+        private bool Italic { get; set; }
+        private string Font { get; set; } = string.Empty;
+        private bool ItalicTwoLines { get; set; }
+        private string StartTags { get; set; } = string.Empty;
+        private string EndTags { get; set; } = string.Empty;
+        private bool AutoBreak { get; set; }
+        private bool SquareBrackets { get; set; }
+        private bool SquareBracketsUppercase { get; set; }
+        private bool SquareBracketsStartWithLowercase { get; set; }
+        private bool RemovePeriod { get; set; }
+        private int BreakNumberOfLines { get; set; }
+        private bool BreakSplitAtLineEnding { get; set; }
+        private bool BreakIsDialog { get; set; }
+        private bool HasReset { get; set; }
+        private string? ReplaceAllText { get; set; }
+
+        private static readonly Regex OverrideBlock = new Regex(@"\{\\[^}]*\}", RegexOptions.Compiled);
+        private static readonly Regex DrawingMode = new Regex(@"\{[^}]*\\p[1-9]", RegexOptions.Compiled);
+
+        // Override tags that apply to the whole line wherever they stand (ASS spec): alignment,
+        // position/movement, rotation origin, fade, clip and wrap style. Anchored to the full tag
+        // so "\alpha", "\fn..." or "\fscx" never match.
+        private static readonly Regex LineGlobalTag = new Regex(
+            @"^(an\d|a\d+|q\d|pos\([^)]*\)|move\([^)]*\)|org\([^)]*\)|fade?\([^)]*\)|i?clip\([^)]*\))\s*$",
+            RegexOptions.Compiled);
+
+        public string SetTagsAndReturnTrimmed(string input, string sourceLanguage)
+        {
+            if (string.IsNullOrWhiteSpace(HtmlUtil.RemoveHtmlTags(input, true).Replace("♪", string.Empty).Replace("♫", string.Empty)) ||
+                DrawingMode.IsMatch(input))
+            {
+                // Nothing to translate - or an ASSA vector drawing ("{\p1}m 0 0 l 100 0 ..."), whose
+                // "text" is shape commands the engine would translate or mangle (#14424). The line
+                // is kept verbatim.
+                ReplaceAllText = input;
+                return "...";
+            }
+
+            var text = input.Trim();
+
+            // SSA/ASS tags
+            while (text.StartsWith("{\\", StringComparison.Ordinal))
+            {
+                var endIndex = text.IndexOf('}');
+                if (endIndex <= 0)
+                {
+                    break;
+                }
+
+                StartTags += text.Substring(0, endIndex + 1);
+                text = text.Remove(0, endIndex + 1).Trim();
+            }
+
+            // Trailing SSA/ASS tags. Only leading blocks used to be taken off, so a block at the
+            // end ("Overboard{\fad(200,200)}") travelled to the engine, where it costs tokens and
+            // comes back "normalized" by small models (#13927). Taking it off here also lets the
+            // italic/font/bracket checks below see the real end of the text.
+            while (text.EndsWith('}'))
+            {
+                var startIndex = text.LastIndexOf("{\\", StringComparison.Ordinal);
+                if (startIndex < 0 || text.IndexOf('}', startIndex) != text.Length - 1)
+                {
+                    break; // no opening block, or the '}' belongs to an earlier block
+                }
+
+                EndTags = text.Substring(startIndex) + EndTags;
+                text = text.Remove(startIndex).Trim();
+            }
+
+            text = MoveLineGlobalBlocksToStart(text);
+
+            // ASSA reset tag
+            if (text.Contains("\\r}", StringComparison.Ordinal) ||
+                text.Contains("\\r\\", StringComparison.Ordinal))
+            {
+                text = text.Replace("\\r}", "\\RESET}");
+                text = text.Replace("\\r\\", "\\RESET\\");
+
+                HasReset = true;
+            }
+
+            // Italic tags
+            if (text.StartsWith("<i>", StringComparison.Ordinal) && text.EndsWith("</i>", StringComparison.Ordinal) && text.Contains("</i>" + Environment.NewLine + "<i>") && Utilities.GetNumberOfLines(text) == 2 && Utilities.CountTagInText(text, "<i>") == 2)
+            {
+                ItalicTwoLines = true;
+                text = HtmlUtil.RemoveOpenCloseTags(text, HtmlUtil.TagItalic);
+            }
+            else if (text.StartsWith("<i>", StringComparison.Ordinal) && text.EndsWith("</i>", StringComparison.Ordinal) && Utilities.CountTagInText(text, "<i>") == 1)
+            {
+                Italic = true;
+                text = text.Substring(3, text.Length - 7);
+            }
+
+            // font tags
+            var idxOfGt = text.IndexOf('>');
+            if (text.StartsWith("<font ", StringComparison.Ordinal) && text.EndsWith("</font>", StringComparison.Ordinal) &&
+                Utilities.CountTagInText(text, "</font>") == 1 && idxOfGt < text.IndexOf("</font>", StringComparison.Ordinal))
+            {
+                Font = text.Substring(0, idxOfGt + 1);
+                text = text.Remove(0, idxOfGt + 1);
+                text = text.Remove(text.Length - "</font>".Length);
+            }
+
+            // Square brackets
+            if (text.StartsWith('[') && text.EndsWith(']') &&
+                Utilities.GetNumberOfLines(text) == 1 && Utilities.CountTagInText(text, "[") == 1 &&
+                Utilities.GetNumberOfLines(text) == 1 && Utilities.CountTagInText(text, "]") == 1)
+            {
+                if (text == text.ToUpperInvariant())
+                {
+                    SquareBracketsUppercase = true;
+                }
+                // text[0] is '[' here (the block is guarded by StartsWith('[')) and the brackets
+                // are not stripped until below, so this was always false: the flag was never set,
+                // and both the CapitalizeFirstLetter here and the re-lowercasing in
+                // ReAddFormatting were dead. Test the first character INSIDE the brackets.
+                else if (text.Length > 2 && char.IsLower(text[1]))
+                {
+                    SquareBracketsStartWithLowercase = true;
+                }
+                else 
+                {
+                    SquareBrackets = true;
+                }
+
+                text = text.Replace("[", string.Empty).Replace("]", string.Empty);
+
+                if (SquareBracketsStartWithLowercase)
+                {
+                    text = text.CapitalizeFirstLetter();
+                }
+
+                if (!text.HasSentenceEnding() && text.Length > 0)
+                {
+                    text += ".";
+                    RemovePeriod = true;
+                }
+            }
+
+            // Un-break line
+            if (sourceLanguage != null && LanguagesAllowingLineMergingSet.Contains(sourceLanguage))
+            {
+                var lines = HtmlUtil.RemoveHtmlTags(text).SplitToLines();
+                if (lines.Count == 2 && !string.IsNullOrEmpty(lines[0]) && !string.IsNullOrEmpty(lines[1]) &&
+                    char.IsLetterOrDigit(lines[0][lines[0].Length - 1]) &&
+                    char.IsLower(lines[1][0]))
+                {
+                    text = Utilities.UnbreakLine(text);
+                    AutoBreak = true;
+                }
+            }
+
+            return text.Trim();
+        }
+
+        /// <summary>
+        /// Takes override blocks in the middle of the text off the engine's input when every tag
+        /// in them applies to the whole line anyway ("Hello{\pos(10,20)} world"), and restores them
+        /// in front of the text - same rendering, and the engine never sees them (#14424).
+        /// A block with any position-dependent tag ("{\i1}", "{\c&amp;H0000FF&amp;}", "{\k20}", "{\t(...)}")
+        /// stays where it is: moving it would change what it styles.
+        /// </summary>
+        private string MoveLineGlobalBlocksToStart(string text)
+        {
+            if (text.IndexOf("{\\", StringComparison.Ordinal) < 0)
+            {
+                return text;
+            }
+
+            var moved = new StringBuilder();
+            var result = OverrideBlock.Replace(text, m =>
+            {
+                if (!IsLineGlobalBlock(m.Value))
+                {
+                    return m.Value;
+                }
+
+                moved.Append(m.Value);
+                return string.Empty;
+            });
+
+            if (moved.Length == 0)
+            {
+                return text;
+            }
+
+            StartTags += moved.ToString();
+            return result.Trim();
+        }
+
+        private static bool IsLineGlobalBlock(string block)
+        {
+            // block is "{\tag1\tag2...}"; a "\t(...)" transform holds nested backslashes, and its
+            // "t(" part never matches, so such a block is always left in place.
+            var tags = block.Substring(2, block.Length - 3).Split('\\');
+            foreach (var tag in tags)
+            {
+                if (!LineGlobalTag.IsMatch(tag))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        public string ReAddFormatting(string input)
+        {
+            var text = input.Trim();
+
+            if (ReplaceAllText != null)
+            {
+                return ReplaceAllText;
+            }
+
+            // Auto-break line
+            if (AutoBreak)
+            {
+                text = Utilities.AutoBreakLine(text);
+            }
+
+            if (RemovePeriod && text.EndsWith('.'))
+            {
+                text = text.Remove(text.Length - 1, 1);
+            }
+
+            // Square brackets
+            if (SquareBracketsUppercase)
+            {
+                text = "[" + text.ToUpperInvariant().Trim() + "]";
+            }
+            else if (SquareBracketsStartWithLowercase)
+            {
+                if (text.Length > 0)
+                {
+                    text = char.ToLower(text[0]) + text.Remove(0, 1);
+                }
+
+                text = "[" + text.Trim() + "]";
+            }
+            else if (SquareBrackets)
+            {
+                text = "[" + text.Trim() + "]";
+            }
+
+            // Italic tags
+            if (ItalicTwoLines)
+            {
+                var sb = new StringBuilder();
+                foreach (var line in text.SplitToLines())
+                {
+                    sb.AppendLine("<i>" + line + "</i>");
+                }
+                text = sb.ToString().Trim();
+            }
+            else if (Italic)
+            {
+                text = "<i>" + text + "</i>";
+            }
+
+            // Font tag
+            if (!string.IsNullOrEmpty(Font))
+            {
+                text = Font + text + "</font>";
+            }
+
+            // ASSA reset tag
+            if (HasReset)
+            {
+                text = text.Replace("\\RESET}", "\\r}");
+                text = text.Replace("\\RESET\\", "\\r\\");
+            }
+
+            // SSA/ASS tags
+            text = StartTags + text + EndTags;
+
+            return text;
+        }
+
+        public string UnBreak(string text, string source)
+        {
+            var lines = source.SplitToLines();
+            BreakNumberOfLines = lines.Count;
+            BreakSplitAtLineEnding = lines.Count == 2 && lines[0].HasSentenceEnding();
+            BreakIsDialog = lines.Count == 2 &&
+                       (lines[0].StartsWith('-') || lines[0].StartsWith("<i>-", StringComparison.Ordinal)) &&
+                       lines[1].StartsWith('-') &&
+                       Utilities.CountTagInText(source, '-') == 2;
+            return Utilities.UnbreakLine(text);
+        }
+
+        public string ReBreak(string text, string language)
+        {
+            if (BreakNumberOfLines == 1)
+            {
+                return text;
+            }
+
+            if (BreakIsDialog && Utilities.GetNumberOfLines(text) == 1 && Utilities.CountTagInText(text, '-') == 2)
+            {
+                return text
+                    .Insert(text.LastIndexOf('-') - 1, Environment.NewLine)
+                    .Replace(" " + Environment.NewLine, Environment.NewLine)
+                    .Replace(Environment.NewLine + " ", Environment.NewLine);
+            }
+
+            return Utilities.AutoBreakLine(text, language, BreakSplitAtLineEnding);
+        }
+    }
+}

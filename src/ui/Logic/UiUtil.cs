@@ -1,0 +1,3776 @@
+﻿using Avalonia;
+using Avalonia.Automation;
+using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
+using Avalonia.Controls.Presenters;
+using Avalonia.Controls.Templates;
+using Avalonia.Data;
+using Avalonia.Data.Converters;
+using Avalonia.Input;
+using Avalonia.LogicalTree;
+using Avalonia.Interactivity;
+using Avalonia.Layout;
+using Avalonia.Media;
+using Avalonia.Platform;
+using Avalonia.Styling;
+using Avalonia.VisualTree;
+using Avalonia.Threading;
+using CommunityToolkit.Mvvm.Input;
+using Nikse.SubtitleEdit.Controls.SyntaxTextEditorControl;
+using Nikse.SubtitleEdit.Features.Shared.ColorPicker;
+using Nikse.SubtitleEdit.Logic.Config;
+using Nikse.SubtitleEdit.Logic.Platform.Windows;
+using Nikse.SubtitleEdit.Logic.ValueConverters;
+using Optris.Icons.Avalonia;
+using SkiaSharp;
+using System;
+using System.Globalization;
+using System.Collections;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Linq;
+using System.Linq.Expressions;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+
+namespace Nikse.SubtitleEdit.Logic;
+
+public static class UiUtil
+{
+    public const int WindowMarginWidth = 12;
+    public const int CornerRadius = 4;
+    public const int SplitterWidthOrHeight = 4;
+
+    /// <summary>
+    /// Grid lines for <see cref="TableView"/>, which - unlike DataGrid - has no
+    /// GridLinesVisibility property. Drawn as cell borders from the same
+    /// Appearance.GridLinesAppearance setting (a <see cref="SeGridLinesVisibility"/>
+    /// name) and compact-mode padding the DataGrid cell themes above use, so both
+    /// controls honour the user's "Show grid lines" choice identically.
+    /// </summary>
+    public static ControlTheme TableViewCellTheme => GetTableViewCellTheme(noPadding: false);
+
+    /// <summary>As <see cref="TableViewCellTheme"/> but with no cell padding, for cells hosting their own controls.</summary>
+    public static ControlTheme TableViewNoPaddingCellTheme => GetTableViewCellTheme(noPadding: true);
+
+    private static ControlTheme GetTableViewCellTheme(bool noPadding)
+    {
+        var showVertical =
+            Se.Settings.Appearance.GridLinesAppearance == nameof(SeGridLinesVisibility.Vertical) ||
+            Se.Settings.Appearance.GridLinesAppearance == nameof(SeGridLinesVisibility.All);
+
+        var showHorizontal =
+            Se.Settings.Appearance.GridLinesAppearance == nameof(SeGridLinesVisibility.Horizontal) ||
+            Se.Settings.Appearance.GridLinesAppearance == nameof(SeGridLinesVisibility.All);
+
+        // Horizontal inset keeps text off the vertical grid line; the vertical inset sets the
+        // row height, because ApplyTableViewRowStyle zeroes the row's own padding (the cell must
+        // fill the row or its borders float inside it instead of forming continuous lines).
+        var padding = noPadding
+            ? new Thickness(0)
+            : new Thickness(4, Se.Settings.Appearance.GridCompactMode ? 2 : 6);
+
+        return new ControlTheme(typeof(TableViewCell))
+        {
+            Setters =
+            {
+                new Setter(TableViewCell.BackgroundProperty, Brushes.Transparent),
+                new Setter(TableViewCell.PaddingProperty, padding),
+                new Setter(TableViewCell.BorderBrushProperty, GetGridLineBrush()),
+                new Setter(TableViewCell.BorderThicknessProperty,
+                    new Thickness(0, 0, showVertical ? 1 : 0, showHorizontal ? 1 : 0)), // vertical and horizontal lines
+                new Setter(TableViewCell.TemplateProperty, TableViewCellTemplate),
+            }
+        };
+    }
+
+    /// <summary>
+    /// Column-header theme matching <see cref="TableViewCellTheme"/>: the same border brush and
+    /// text inset, a bottom line closing the top of the first row, and a right line continuing
+    /// the cells' vertical grid line. The built-in header draws its separator as a semi-transparent
+    /// rectangle inside the resize Thumb, which is both a different colour and 6px off from the
+    /// cell borders - <see cref="ApplyTableViewRowStyle"/> hides it and aligns the rows.
+    /// </summary>
+    public static ControlTheme TableViewColumnHeaderTheme => GetTableViewColumnHeaderTheme();
+
+    private static ControlTheme GetTableViewColumnHeaderTheme()
+    {
+        return new ControlTheme(typeof(TableViewColumnHeader))
+        {
+            Setters =
+            {
+                // Match the DataGrid header background: the Fluent DataGrid resource by
+                // default; SE's custom themes (lighter dark, classic gray, pastel) override
+                // both header types with the same brush via app styles in UiTheme.
+                new Setter(TableViewColumnHeader.BackgroundProperty, GetDataGridHeaderBackgroundBrush()),
+                new Setter(TableViewColumnHeader.PaddingProperty, new Thickness(4, 6, 4, 5)),
+                // The faint grid-line brush, not the full border brush: with grid lines set
+                // to None these are the only separators in the grid, and at 0.5 opacity they
+                // read much stronger than anything the old DataGrid drew.
+                new Setter(TableViewColumnHeader.BorderBrushProperty, GetGridLineBrush()),
+                // Both header lines always show, independently of the grid-lines setting: the
+                // bottom line separates the header from the first row and the right line
+                // separates the column headers from each other, the way DataGrid's header
+                // (with its always-on separators) does.
+                new Setter(TableViewColumnHeader.BorderThicknessProperty, new Thickness(0, 0, 1, 1)),
+                new Setter(TableViewColumnHeader.TemplateProperty, TableViewColumnHeaderTemplate),
+            }
+        };
+    }
+
+    private static IBrush GetDataGridHeaderBackgroundBrush()
+    {
+        if (Application.Current != null &&
+            Application.Current.TryGetResource("DataGridColumnHeaderBackgroundBrush",
+                Application.Current.ActualThemeVariant, out var resource) &&
+            resource is IBrush brush)
+        {
+            return brush;
+        }
+
+        return Brushes.Transparent;
+    }
+
+    // Mirrors the built-in header template (content + resize thumb) but routes the border
+    // properties to the presenter so the header's lines match the cells', and drops the
+    // thumb's own off-colour separator rectangle.
+    private static readonly FuncControlTemplate<TableViewColumnHeader> TableViewColumnHeaderTemplate =
+        new((_, scope) =>
+        {
+            var presenter = new ContentPresenter
+            {
+                Name = "PART_ContentPresenter",
+                [!ContentPresenter.ContentProperty] = new TemplateBinding(ContentControl.ContentProperty),
+                [!ContentPresenter.ContentTemplateProperty] = new TemplateBinding(ContentControl.ContentTemplateProperty),
+                [!ContentPresenter.BackgroundProperty] = new TemplateBinding(TemplatedControl.BackgroundProperty),
+                [!ContentPresenter.BorderBrushProperty] = new TemplateBinding(TemplatedControl.BorderBrushProperty),
+                [!ContentPresenter.BorderThicknessProperty] = new TemplateBinding(TemplatedControl.BorderThicknessProperty),
+                [!ContentPresenter.PaddingProperty] = new TemplateBinding(TemplatedControl.PaddingProperty),
+                [!ContentPresenter.HorizontalContentAlignmentProperty] = new TemplateBinding(ContentControl.HorizontalContentAlignmentProperty),
+                [!ContentPresenter.VerticalContentAlignmentProperty] = new TemplateBinding(ContentControl.VerticalContentAlignmentProperty),
+            }.RegisterInNameScope(scope);
+
+            // Keep the resize grip - TableViewColumn.CanUserResize works through it.
+            var thumb = new Thumb
+            {
+                Name = "PART_Resizer",
+                Width = 12,
+                Margin = new Thickness(0, 0, -6, 0),
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Cursor = new Cursor(StandardCursorType.SizeWestEast),
+                Background = Brushes.Transparent,
+                Template = new FuncControlTemplate<Thumb>((_, _) => new Border { Background = Brushes.Transparent }),
+            }.RegisterInNameScope(scope);
+
+            return new Panel { Children = { presenter, thumb } };
+        });
+
+    /// <summary>
+    /// Makes <see cref="TableView"/> rows tight to their cells. TableViewRow is a ListBoxItem
+    /// and its default padding sits *outside* the cells, so cell borders would be drawn inside
+    /// the row - horizontal lines floating above the row edge and vertical lines broken into
+    /// one segment per row instead of continuous columns. The cells carry the inset instead
+    /// (see the cell themes above). Call this on any TableView using those cell themes.
+    /// </summary>
+    public static void ApplyTableViewRowStyle(TableView tableView)
+    {
+        tableView.Styles.Add(new Style(x => x.OfType<TableViewRow>())
+        {
+            Setters =
+            {
+                new Setter(TableViewRow.PaddingProperty, new Thickness(0)),
+                new Setter(TableViewRow.MinHeightProperty, 0.0),
+            }
+        });
+
+        // TableView's template wraps the header in a Border with hard-coded 6,9,6,12 padding
+        // while rows sit flush against the control edge. Left alone the header's column border
+        // lands 6px right of the cell borders below it, and its bottom line floats 12px above
+        // the first row. The Border is an unnamed template part, so it can't be reached by a
+        // selector - zero its padding once the template is applied.
+        tableView.Loaded += (_, _) =>
+        {
+            var headersPresenter = tableView.GetVisualDescendants()
+                .OfType<TableViewColumnHeadersPresenter>()
+                .FirstOrDefault();
+            if (headersPresenter?.GetVisualParent() is Border headerBorder)
+            {
+                headerBorder.Padding = new Thickness(0);
+            }
+        };
+    }
+
+    // TableViewCell's built-in template only template-binds Background, so the border
+    // properties set above would never be drawn. Bind them through to the presenter
+    // (which renders its own border) so the grid lines actually appear.
+    private static readonly FuncControlTemplate<TableViewCell> TableViewCellTemplate =
+        new((_, scope) => new ContentPresenter
+        {
+            Name = "PART_ContentPresenter",
+            [!ContentPresenter.ContentProperty] = new TemplateBinding(ContentControl.ContentProperty),
+            [!ContentPresenter.ContentTemplateProperty] = new TemplateBinding(ContentControl.ContentTemplateProperty),
+            [!ContentPresenter.BackgroundProperty] = new TemplateBinding(TemplatedControl.BackgroundProperty),
+            [!ContentPresenter.BorderBrushProperty] = new TemplateBinding(TemplatedControl.BorderBrushProperty),
+            [!ContentPresenter.BorderThicknessProperty] = new TemplateBinding(TemplatedControl.BorderThicknessProperty),
+            [!ContentPresenter.PaddingProperty] = new TemplateBinding(TemplatedControl.PaddingProperty),
+            [!ContentPresenter.HorizontalContentAlignmentProperty] = new TemplateBinding(ContentControl.HorizontalContentAlignmentProperty),
+            [!ContentPresenter.VerticalContentAlignmentProperty] = new TemplateBinding(ContentControl.VerticalContentAlignmentProperty),
+        }.RegisterInNameScope(scope));
+
+
+
+    // On macOS the default UI font's ascent sits right at the cap height, so Avalonia's line box
+    // clips the dots on tall diacritics (Ä/Ö/Ü) at the top - in text boxes and grid cells alike
+    // (issue #11997). Giving the line a bit of extra leading (LineHeight) lifts the line box so the
+    // diacritics fit; padding does not help a TextBox, but LineHeight fixes both TextBox and TextBlock.
+    // Bound to the live FontSize (rather than a fixed value) so it scales with the chosen font size,
+    // and applied only on macOS so Windows/Linux line spacing is unchanged.
+    private static readonly IValueConverter DiacriticLineHeightConverter =
+        new FuncValueConverter<double, double>(fontSize =>
+            double.IsNaN(fontSize) || fontSize <= 0 ? double.NaN : fontSize * 1.4);
+
+    public static void FixMacDiacriticClipping(Control? control)
+    {
+        if (control == null || !OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+        control.Bind(TextBlock.LineHeightProperty, new Binding
+        {
+            Source = control,
+            Path = nameof(TextBlock.FontSize),
+            Converter = DiacriticLineHeightConverter,
+        });
+    }
+
+    public static Button MakeButton(string text)
+    {
+        return MakeButton(text, null);
+    }
+
+    private static readonly string[] GoodFontNames =
+    {
+        "Segoe UI",
+        "San Francisco",
+        "SF Pro Text",
+        "Roboto",
+        "Open Sans",
+        "Lato",
+        "Source Sans Pro",
+        "Calibri",
+        "Verdana",
+        "Tahoma",
+        "Inter",
+        "Noto Sans",
+        "System UI",
+        "Arial",
+    };
+
+    public static string GetDefaultFontName()
+    {
+        if (!string.IsNullOrEmpty(Se.Settings.Appearance.FontName))
+        {
+            return Se.Settings.Appearance.FontName;
+        }
+
+        var systemFontNames = FontHelper.GetSystemFonts();
+        foreach (var goodFontName in GoodFontNames)
+        {
+            if (systemFontNames.Contains(goodFontName))
+            {
+                return goodFontName;
+            }
+        }
+
+        return systemFontNames.First();
+    }
+
+    // These brushes are handed out from many hot construction paths (borders, separators,
+    // grid cell themes), so cache immutable instances per theme/opacity instead of allocating
+    // a new SolidColorBrush on every call. ImmutableSolidColorBrush is safe to share.
+    private static readonly Dictionary<(bool IsDark, double Opacity), IBrush> TextBrushCache = new();
+
+    public static IBrush GetTextColor(double opacity = 1.0)
+    {
+        var isDark = Application.Current?.ActualThemeVariant == ThemeVariant.Dark;
+        var key = (isDark, opacity);
+        if (!TextBrushCache.TryGetValue(key, out var brush))
+        {
+            brush = new Avalonia.Media.Immutable.ImmutableSolidColorBrush(isDark ? Colors.White : Colors.Black, opacity);
+            TextBrushCache[key] = brush;
+        }
+
+        return brush;
+    }
+
+    private static readonly IBrush BorderBrushDark = new Avalonia.Media.Immutable.ImmutableSolidColorBrush(Colors.White, 0.5);
+    private static readonly IBrush BorderBrushLight = new Avalonia.Media.Immutable.ImmutableSolidColorBrush(Colors.Black, 0.5);
+
+    // Fainter variant for the TableView's in-body grid lines: drawn as per-cell borders
+    // they read stronger than the old DataGrid's gridline pass, so tone them down.
+    private static readonly IBrush GridLineBrushDark = new Avalonia.Media.Immutable.ImmutableSolidColorBrush(Colors.White, 0.22);
+    private static readonly IBrush GridLineBrushLight = new Avalonia.Media.Immutable.ImmutableSolidColorBrush(Colors.Black, 0.22);
+
+    public static IBrush GetGridLineBrush()
+    {
+        return Application.Current?.ActualThemeVariant == ThemeVariant.Dark
+            ? GridLineBrushDark
+            : GridLineBrushLight;
+    }
+
+    public static IBrush GetBorderBrush()
+    {
+        return Application.Current?.ActualThemeVariant == ThemeVariant.Dark
+            ? BorderBrushDark
+            : BorderBrushLight;
+    }
+
+    public static IBrush GetAccentBrush()
+    {
+        var app = Application.Current;
+        if (app != null)
+        {
+            app.TryGetResource("SystemAccentColor", app.ActualThemeVariant, out var resource);
+            if (resource is Color color)
+                return new SolidColorBrush(color);
+        }
+        return new SolidColorBrush(Colors.DodgerBlue);
+    }
+
+    public static Color GetBorderColor()
+    {
+        var color = Colors.Black;
+
+        var app = Application.Current;
+        if (app != null)
+        {
+            var theme = app.ActualThemeVariant;
+            if (theme == ThemeVariant.Dark)
+            {
+                color = Colors.White;
+            }
+        }
+
+        return new Color(128, color.R, color.G, color.B);
+    }
+
+    public static Separator MakeHorizontalSeparator(double height = 0.5, double opacity = 0.5, Thickness? margin = null,
+        IBrush? background = null)
+    {
+        return new Separator
+        {
+            Height = height,
+            Margin = margin ?? new Thickness(5, 1),
+            Background = background ?? GetBorderBrush(),
+            Opacity = opacity,
+        };
+    }
+
+    public static Border MakeVerticalSeparator(double width = 2.5, double opacity = 0.5, Thickness? margin = null,
+        IBrush? background = null)
+    {
+        return new Border
+        {
+            Width = width,
+            Margin = margin ?? new Thickness(1, 5),
+            Background = background ?? GetBorderBrush(),
+            Opacity = opacity,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            HorizontalAlignment = HorizontalAlignment.Center
+        };
+    }
+
+    /// <summary>
+    /// Creates the standard progress bar used by download and progress windows.
+    /// </summary>
+    public static ProgressBar MakeProgressBar(double height = 10)
+    {
+        return new ProgressBar
+        {
+            Minimum = 0,
+            Maximum = 100,
+            Height = height,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+    }
+
+    public static Button MakeButton(string text, IRelayCommand? command, object? parameter = null)
+    {
+        var (displayText, accessKey) = ParseAccessKey(text);
+
+        // Keep the `_` marker in the rendered label so the access letter is underlined while Alt is
+        // held (#14716): the HotKey below fires the command, but with plain-string content nothing
+        // ever told the user that Alt+F / Alt+R existed. AccessText owns the underline; it is not
+        // handed the access key itself, so the chord keeps firing exactly once through the HotKey.
+        object content = accessKey.HasValue
+            ? new AccessText { Text = text, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center }
+            : displayText;
+
+        var button = new Button
+        {
+            Content = content,
+            Margin = new Thickness(4, 0),
+            Padding = new Thickness(12, 6),
+            MinWidth = 80,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Command = command,
+            CommandParameter = parameter,
+        };
+
+        if (accessKey.HasValue)
+        {
+            button.HotKey = new KeyGesture(accessKey.Value, KeyModifiers.Alt);
+        }
+
+        if (Se.Settings.Appearance.UseFocusedButtonBackgroundColor)
+        {
+            var focusStyle = new Style(x => x.OfType<Button>().Class(":focus"));
+            focusStyle.Setters.Add(new Setter(Button.BackgroundProperty, GetFocusedButtonBackgroundBrush()));
+            //focusStyle.Setters.Add(new Setter(Button.ForegroundProperty, Brushes.White));
+            button.Styles.Add(focusStyle);
+        }
+
+        return button;
+    }
+
+    private static IBrush? _focusedButtonBackgroundBrush;
+    private static string? _focusedButtonBackgroundHex;
+
+    // Every button parses the configured hex color and allocated a brush; cache one
+    // immutable brush and only rebuild it when the setting changes.
+    private static IBrush GetFocusedButtonBackgroundBrush()
+    {
+        var hex = Se.Settings.Appearance.FocusedButtonBackgroundColor;
+        if (_focusedButtonBackgroundBrush == null || _focusedButtonBackgroundHex != hex)
+        {
+            _focusedButtonBackgroundBrush = new Avalonia.Media.Immutable.ImmutableSolidColorBrush(hex.FromHexToColor());
+            _focusedButtonBackgroundHex = hex;
+        }
+
+        return _focusedButtonBackgroundBrush;
+    }
+
+    /// <summary>
+    /// The label without its `_` access-key marker, for showing a button caption as plain text
+    /// (e.g. "_Done" as a batch row status, which showed the underscore).
+    /// </summary>
+    public static string RemoveAccessKey(string text)
+    {
+        return ParseAccessKey(text).Display;
+    }
+
+    // Parses a single `_` access-key marker out of a button label and returns the visible text plus
+    // the matching Avalonia Key. Mirrors the WinForms `&` convention used in the language files
+    // (e.g. "_OK" → display "OK", Alt+O; "C_ancel" → display "Cancel", Alt+A).
+    private static (string Display, Key? AccessKey) ParseAccessKey(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return (text ?? string.Empty, null);
+        }
+
+        var idx = text.IndexOf('_');
+        if (idx < 0 || idx + 1 >= text.Length)
+        {
+            return (text, null);
+        }
+
+        var accessChar = text[idx + 1];
+        var display = text.Remove(idx, 1);
+        return TryGetAccessKey(accessChar, out var key) ? (display, key) : (display, null);
+    }
+
+    /// <summary>
+    /// WinForms fired a button mnemonic on the bare letter whenever the focused control did not
+    /// consume text, so SE4 users clicked "Find" once and then tapped F / R / A with the focus
+    /// resting on the buttons (discussion #14716). Mirror that: with no modifier held and focus
+    /// outside any text input, a key matching a button's Alt access key runs that button.
+    /// Returns true when a button was invoked.
+    /// </summary>
+    internal static bool TryInvokeBareAccessKey(Window? window, KeyEventArgs e)
+    {
+        if (window == null || e.Handled || e.KeyModifiers != KeyModifiers.None)
+        {
+            return false;
+        }
+
+        var focused = TopLevel.GetTopLevel(window)?.FocusManager?.GetFocusedElement();
+        if (focused is TextBox || focused is AutoCompleteBox || focused is ComboBox { IsEditable: true })
+        {
+            return false;
+        }
+
+        foreach (var button in window.GetLogicalDescendants().OfType<Button>())
+        {
+            if (button.HotKey is not { KeyModifiers: KeyModifiers.Alt } gesture || gesture.Key != e.Key)
+            {
+                continue;
+            }
+
+            if (!button.IsEffectivelyEnabled || !button.IsEffectivelyVisible)
+            {
+                return false;
+            }
+
+            var parameter = button.CommandParameter;
+            if (button.Command?.CanExecute(parameter) != true)
+            {
+                return false;
+            }
+
+            e.Handled = true;
+            button.Focus();
+            button.Command.Execute(parameter);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryGetAccessKey(char c, out Key key)
+    {
+        var upper = char.ToUpperInvariant(c);
+        if (upper >= 'A' && upper <= 'Z')
+        {
+            key = Key.A + (upper - 'A');
+            return true;
+        }
+        if (upper >= '0' && upper <= '9')
+        {
+            key = Key.D0 + (upper - '0');
+            return true;
+        }
+        key = Key.None;
+        return false;
+    }
+
+    public static Button MakeBrowseButton(IRelayCommand? command)
+    {
+        return new Button
+        {
+            Content = "...",
+            Margin = new Thickness(4, 0),
+            Padding = new Thickness(6, 6),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Command = command,
+        };
+    }
+
+    /// <summary>
+    /// Gives a card-style button a green-ish background while hovered, focused or pressed,
+    /// so the active choice stands out (used by the assisted split/move option cards).
+    /// </summary>
+    public static Button WithGreenishActiveBackground(this Button button)
+    {
+        var activeBrush = new SolidColorBrush(Color.FromArgb(0x50, 0x4C, 0xAF, 0x50));
+        var pressedBrush = new SolidColorBrush(Color.FromArgb(0x78, 0x4C, 0xAF, 0x50));
+        foreach (var (pseudoClass, brush) in new[] { (":pointerover", activeBrush), (":focus", activeBrush), (":pressed", pressedBrush) })
+        {
+            button.Styles.Add(new Style(x => x.OfType<Button>().Class(pseudoClass).Template().OfType<ContentPresenter>())
+            {
+                Setters = { new Setter(ContentPresenter.BackgroundProperty, brush) },
+            });
+        }
+
+        return button;
+    }
+
+    /// <summary>
+    /// The dialog's accept button. <see cref="Button.IsDefault"/> makes it click on an unhandled
+    /// Enter anywhere in the window - the role WinForms' AcceptButton had in Subtitle Edit 4.
+    /// Initial focus deliberately does not land on this button (a focused button also clicks on
+    /// bare Space, see <see cref="FocusOnFirstActivation"/>), so without this Enter would reach OK
+    /// only after tabbing to it (#14586). Controls that give Enter their own meaning - a multi-line
+    /// TextBox, an open ComboBox, a focused Cancel button - mark the key handled first and win.
+    /// A window key handler that runs OK on Enter itself must also set Handled, or OK runs twice
+    /// (InitialFocusConventionTests checks that).
+    /// </summary>
+    public static Button MakeButtonOk(IRelayCommand? command)
+    {
+        var button = MakeButton(Se.Language.General.Ok, command);
+        button.IsDefault = true;
+        return button;
+    }
+
+    public static Button MakeButtonDone(IRelayCommand? command)
+    {
+        var button = MakeButton(Se.Language.General.Done, command);
+        button.IsDefault = true;
+        return button;
+    }
+
+    public static Button MakeButtonCancel(IRelayCommand? command)
+    {
+        return MakeButton(Se.Language.General.Cancel, command);
+    }
+
+    public static Button MakeButton(IRelayCommand? command, string iconName)
+    {
+        var button = new Button
+        {
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Command = command,
+        };
+
+        Attached.SetIcon(button, iconName);
+
+        return button;
+    }
+
+    public static Button MakeButton(IRelayCommand? command, string iconName, int fontSize)
+    {
+        var button = new Button
+        {
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Command = command,
+            FontSize = ScaledFontSize(fontSize),
+        };
+
+        Attached.SetIcon(button, iconName);
+
+        return button;
+    }
+
+    public static Button MakeButton(IRelayCommand? command, string iconName, string hint)
+    {
+        var button = new Button
+        {
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Command = command,
+        };
+
+        Attached.SetIcon(button, iconName);
+
+        // An icon-only button has no text content, so expose the hint as the accessible name for
+        // screen readers (a ToolTip is not surfaced as the UIA Name). Done unconditionally - unlike the
+        // visual tooltip, the name should be available even when hints are turned off (#11745).
+        AutomationProperties.SetName(button, hint);
+
+        if (Se.Settings.Appearance.ShowHints)
+        {
+            AttachHoverTooltip(button, hint);
+        }
+
+        return button;
+    }
+
+    /// <summary>
+    /// A small "i" icon that shows <paramref name="hint"/> on hover - the compact alternative to a
+    /// wall of description text under every option (#14331). The icon only carries a tooltip, so it
+    /// is hidden outright when hints are turned off; the text is still handed to screen readers via
+    /// the described control's help text, which does not depend on the hint setting.
+    /// </summary>
+    /// <param name="hint">The explanation to show.</param>
+    /// <param name="describes">The control the hint belongs to, so screen readers announce it too.</param>
+    public static Control MakeHintIcon(string hint, Control? describes = null)
+    {
+        var icon = new ContentControl
+        {
+            Width = 16,
+            Height = 16,
+            VerticalAlignment = VerticalAlignment.Center,
+            Opacity = 0.7,
+            IsVisible = Se.Settings.Appearance.ShowHints,
+        };
+
+        Attached.SetIcon(icon, IconNames.Information);
+        AutomationProperties.SetName(icon, hint);
+
+        if (describes != null)
+        {
+            AutomationProperties.SetHelpText(describes, hint);
+        }
+
+        if (Se.Settings.Appearance.ShowHints)
+        {
+            AttachHoverTooltip(icon, hint);
+        }
+
+        return icon;
+    }
+
+    // On macOS, Avalonia's built-in ToolTip hover service does not open on hover inside modal
+    // dialogs - the popup itself works (a forced ToolTip.IsOpen renders it, and the pointer-over
+    // state is detected), but the hover trigger never fires, so icon-button hints were invisible in
+    // every dialog. Windows/Linux work fine and keep the native behaviour; on macOS we drive the
+    // tooltip ourselves: open it after a short hover and close it when the pointer leaves. (#12013)
+    public static void AttachHoverTooltip(Control control, string hint)
+    {
+        ToolTip.SetTip(control, hint);
+
+        if (!OperatingSystem.IsMacOS())
+        {
+            return; // native ToolTip hover service works on Windows/Linux
+        }
+
+        System.Threading.CancellationTokenSource? hoverCts = null;
+
+        control.PointerEntered += (_, _) =>
+        {
+            hoverCts?.Cancel();
+            hoverCts = new System.Threading.CancellationTokenSource();
+            var token = hoverCts.Token;
+            DispatcherTimer.RunOnce(() =>
+            {
+                if (!token.IsCancellationRequested && control.IsPointerOver)
+                {
+                    ToolTip.SetIsOpen(control, true);
+                }
+            }, TimeSpan.FromMilliseconds(400));
+        };
+
+        control.PointerExited += (_, _) =>
+        {
+            hoverCts?.Cancel();
+            ToolTip.SetIsOpen(control, false);
+        };
+    }
+
+
+    public static Button MakeButtonBrowse(IRelayCommand? command, string? propertyIsVisiblePath = null, string? accessibleName = null)
+    {
+        var button = new Button
+        {
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Command = command,
+        };
+
+        if (propertyIsVisiblePath != null)
+        {
+            button.Bind(Button.IsVisibleProperty, new Binding
+            {
+                Path = propertyIsVisiblePath,
+            });
+        }
+
+        Attached.SetIcon(button, IconNames.DotsHorizontal);
+
+        // The browse "…" glyph carries no text, so screen readers announce a nameless button. Callers
+        // that can describe the target should pass an accessible name so NVDA can announce it (#11745).
+        if (!string.IsNullOrEmpty(accessibleName))
+        {
+            AutomationProperties.SetName(button, accessibleName);
+        }
+
+        return button;
+    }
+
+    public static Button BindIsEnabled(this Button control, object viewModal, string propertyIsEnabledPath)
+    {
+        control.Bind(Button.IsEnabledProperty, new Binding
+        {
+            Path = propertyIsEnabledPath,
+            Mode = BindingMode.OneWay,
+            Source = viewModal,
+            UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged
+        });
+
+        return control;
+    }
+
+    public static ComboBox BindIsEnabled(this ComboBox control, object viewModal, string propertyIsEnabledPath)
+    {
+        control.Bind(ComboBox.IsEnabledProperty, new Binding
+        {
+            Path = propertyIsEnabledPath,
+            Mode = BindingMode.OneWay,
+            Source = viewModal,
+            UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged
+        });
+
+        return control;
+    }
+
+    public static ComboBox BindIsEnabled(this ComboBox control, object viewModal, string propertyIsEnabledPath,
+        IValueConverter converter)
+    {
+        control.Bind(ComboBox.IsEnabledProperty, new Binding
+        {
+            Path = propertyIsEnabledPath,
+            Mode = BindingMode.OneWay,
+            Source = viewModal,
+            UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged,
+            Converter = converter,
+        });
+
+        return control;
+    }
+
+    public static NumericUpDown BindIsEnabled(this NumericUpDown control, object viewModal, string propertyIsEnabledPath,
+        IValueConverter converter)
+    {
+        control.Bind(NumericUpDown.IsEnabledProperty, new Binding
+        {
+            Path = propertyIsEnabledPath,
+            Mode = BindingMode.OneWay,
+            Source = viewModal,
+            UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged,
+            Converter = converter,
+        });
+
+        return control;
+    }
+
+    public static Button BindIsEnabled(this Button control, object viewModal, string propertyIsEnabledPath,
+        IValueConverter converter)
+    {
+        control.Bind(Button.IsEnabledProperty, new Binding
+        {
+            Path = propertyIsEnabledPath,
+            Mode = BindingMode.OneWay,
+            Source = viewModal,
+            UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged,
+            Converter = converter,
+        });
+
+        return control;
+    }
+
+    public static TextBox BindIsEnabled(this TextBox control, object viewModal, string propertyIsEnabledPath,
+        IValueConverter converter)
+    {
+        control.Bind(TextBox.IsEnabledProperty, new Binding
+        {
+            Path = propertyIsEnabledPath,
+            Mode = BindingMode.OneWay,
+            Source = viewModal,
+            UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged,
+            Converter = converter,
+        });
+
+        return control;
+    }
+
+    public static ComboBox MakeComboBox<T>(
+        ObservableCollection<T> sourceItems,
+        object viewModal,
+        string? propertySelectedPath,
+        string? propertyIsVisiblePath)
+    {
+        var comboBox = new ComboBox
+        {
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalContentAlignment = HorizontalAlignment.Left,
+            VerticalContentAlignment = VerticalAlignment.Center,
+        };
+        comboBox.ItemsSource = sourceItems;
+        comboBox.DataContext = viewModal;
+
+        if (propertySelectedPath != null)
+        {
+            comboBox.Bind(ComboBox.SelectedItemProperty, new Binding
+            {
+                Path = propertySelectedPath,
+                Mode = BindingMode.TwoWay,
+            });
+        }
+
+        if (propertyIsVisiblePath != null)
+        {
+            comboBox.Bind(ComboBox.IsVisibleProperty, new Binding
+            {
+                Path = propertyIsVisiblePath,
+                Mode = BindingMode.OneWay,
+            });
+        }
+
+        return comboBox;
+    }
+
+    private sealed class ComboBoxTypeSearchState
+    {
+        public string Prefix = string.Empty;
+        public long LastTypedTicks;
+    }
+
+    private static readonly ConditionalWeakTable<ComboBox, ComboBoxTypeSearchState> ComboBoxTypeSearchStates = new();
+
+    /// <summary>
+    /// App-wide: lets the user jump to a drop-down item by typing its first letters
+    /// (e.g. "Ar" selects "Arial"), like a classic WinForms combo box. Repeating the
+    /// same letter cycles through items starting with it; the typed prefix resets
+    /// after a short pause. Call once at startup.
+    /// </summary>
+    public static void EnableComboBoxTypeSearch()
+    {
+        InputElement.TextInputEvent.AddClassHandler<ComboBox>(ComboBoxTypeSearchTextInput, RoutingStrategies.Tunnel);
+    }
+
+    private static void ComboBoxTypeSearchTextInput(ComboBox comboBox, TextInputEventArgs e)
+    {
+        if (comboBox.IsEditable)
+        {
+            return; // typing must edit the text, not jump the selection
+        }
+
+        var text = e.Text;
+        if (string.IsNullOrEmpty(text) || char.IsControl(text[0]))
+        {
+            return;
+        }
+
+        var state = ComboBoxTypeSearchStates.GetOrCreateValue(comboBox);
+        var nowTicks = Environment.TickCount64;
+        if (nowTicks - state.LastTypedTicks > 1200)
+        {
+            state.Prefix = string.Empty;
+        }
+        state.LastTypedTicks = nowTicks;
+        state.Prefix += text;
+
+        var items = comboBox.Items;
+        if (items.Count == 0)
+        {
+            return;
+        }
+
+        var index = FindItemStartingWith(items, state.Prefix, startIndex: 0);
+        if (index < 0 && state.Prefix.Length > 1 && state.Prefix.All(c => char.ToLowerInvariant(c) == char.ToLowerInvariant(state.Prefix[0])))
+        {
+            // Same letter repeated: cycle through items starting with that letter.
+            state.Prefix = state.Prefix[..1];
+            index = FindItemStartingWith(items, state.Prefix, startIndex: comboBox.SelectedIndex + 1);
+            if (index < 0)
+            {
+                index = FindItemStartingWith(items, state.Prefix, startIndex: 0);
+            }
+        }
+
+        if (index >= 0)
+        {
+            comboBox.SelectedIndex = index;
+            e.Handled = true;
+        }
+    }
+
+    private static int FindItemStartingWith(IList items, string prefix, int startIndex)
+    {
+        for (var i = Math.Max(0, startIndex); i < items.Count; i++)
+        {
+            var display = items[i]?.ToString();
+            if (display != null && display.StartsWith(prefix, StringComparison.CurrentCultureIgnoreCase))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    internal static ComboBox MakeComboBoxBindText<T>(ObservableCollection<T> sourceItems, object vm, string textPath,
+        string propertySelectedIndexPath)
+    {
+        var comboBox = new ComboBox
+        {
+            ItemsSource = sourceItems,
+            DataContext = vm,
+            DisplayMemberBinding = new Binding(textPath),
+        };
+
+        comboBox.Bind(ComboBox.SelectedIndexProperty, new Binding
+        {
+            Path = propertySelectedIndexPath,
+            Mode = BindingMode.TwoWay,
+        });
+
+
+        return comboBox;
+    }
+
+    public static ComboBox MakeComboBox<T>(
+        ObservableCollection<T> sourceItems,
+        object viewModal,
+        string? propertySelectedPath)
+    {
+        return MakeComboBox(sourceItems, viewModal, propertySelectedPath, null);
+    }
+
+    /// <summary>
+    /// A text box with a drop-down of preset values - the user can still type anything.
+    /// Use where a handful of values cover most cases but the field is free text, e.g. the
+    /// music/pilcrow symbols in "Remove text for hearing impaired" (SE 4 parity).
+    /// </summary>
+    public static ComboBox MakeEditableComboBox(double width, IEnumerable<string> presets, object viewModel,
+        string propertyTextPath)
+    {
+        var comboBox = new ComboBox
+        {
+            Width = width,
+            IsEditable = true,
+            ItemsSource = presets.ToList(),
+            DataContext = viewModel,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalContentAlignment = HorizontalAlignment.Left,
+            VerticalContentAlignment = VerticalAlignment.Center,
+        };
+
+        comboBox.Bind(ComboBox.TextProperty, new Binding
+        {
+            Path = propertyTextPath,
+            Mode = BindingMode.TwoWay,
+        });
+
+        return comboBox;
+    }
+
+    public static TextBox MakeTextBox(double width, object viewModel, string propertyTextPath)
+    {
+        return MakeTextBox(width, viewModel, propertyTextPath, null);
+    }
+
+    public static TextBox MakeTextBox(double width, object viewModel, string? propertyTextPath,
+        string? propertyIsVisiblePath)
+    {
+        var textBox = new TextBox
+        {
+            Width = width,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        textBox.DataContext = viewModel;
+
+        if (propertyTextPath != null)
+        {
+            textBox.Bind(TextBox.TextProperty, new Binding
+            {
+                Path = propertyTextPath,
+                Mode = BindingMode.TwoWay,
+            });
+        }
+
+        if (propertyIsVisiblePath != null)
+        {
+            textBox.Bind(TextBox.IsVisibleProperty, new Binding
+            {
+                Path = propertyIsVisiblePath,
+                Mode = BindingMode.OneWay,
+            });
+        }
+
+        return textBox;
+    }
+
+    /// <summary>
+    /// Text box for API keys and similar secrets: masked by default so the value never shows
+    /// in screenshots or screen shares, with an eye button to reveal it while editing.
+    /// </summary>
+    public static StackPanel MakeApiKeyTextBox(double width, object viewModel, string propertyTextPath,
+        string? propertyIsVisiblePath = null)
+    {
+        var textBox = MakeTextBox(width, viewModel, propertyTextPath);
+        textBox.PasswordChar = '●';
+        AutomationProperties.SetName(textBox, Se.Language.General.ApiKey);
+
+        var buttonReveal = MakeButton(null, IconNames.Eye);
+        AutomationProperties.SetName(buttonReveal, Se.Language.General.ApiKey);
+        buttonReveal.Click += (_, _) =>
+        {
+            textBox.RevealPassword = !textBox.RevealPassword;
+            Attached.SetIcon(buttonReveal, textBox.RevealPassword ? IconNames.EyeOff : IconNames.Eye);
+        };
+
+        var panel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 5,
+            VerticalAlignment = VerticalAlignment.Center,
+            Children = { textBox, buttonReveal },
+        };
+
+        if (propertyIsVisiblePath != null)
+        {
+            panel.DataContext = viewModel;
+            panel.Bind(StackPanel.IsVisibleProperty, new Binding(propertyIsVisiblePath));
+        }
+
+        return panel;
+    }
+
+    public static TextBlock MakeTextBlock(string text)
+    {
+        return new TextBlock
+        {
+            Text = text,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+    }
+
+    public static TextBlock MakeTextBlock(string text, object viewModel, string? textPropertyPath,
+        string? visibilityPropertyPath)
+    {
+        var textBlock = new TextBlock
+        {
+            Text = text,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            DataContext = viewModel,
+        };
+
+        if (textPropertyPath != null)
+        {
+            textBlock.Bind(TextBlock.TextProperty, new Binding
+            {
+                Path = textPropertyPath,
+                Mode = BindingMode.OneWay,
+            });
+        }
+
+        if (visibilityPropertyPath != null)
+        {
+            textBlock.Bind(TextBlock.IsVisibleProperty, new Binding
+            {
+                Path = visibilityPropertyPath,
+                Mode = BindingMode.OneWay,
+            });
+        }
+
+        return textBlock;
+    }
+
+    public static CheckBox MakeCheckBox()
+    {
+        return new CheckBox
+        {
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+    }
+
+    public static CheckBox MakeCheckBox(object viewModel, string? isCheckedPropertyPath)
+    {
+        var checkBox = new CheckBox
+        {
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            DataContext = viewModel,
+        };
+
+        if (isCheckedPropertyPath != null)
+        {
+            checkBox.Bind(CheckBox.IsCheckedProperty, new Binding
+            {
+                Path = isCheckedPropertyPath,
+                Mode = BindingMode.TwoWay,
+            });
+        }
+
+        return checkBox;
+    }
+
+    public static CheckBox MakeCheckBox(string text, object viewModel, string? isCheckedPropertyPath)
+    {
+        var checkBox = new CheckBox
+        {
+            Content = text,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            DataContext = viewModel,
+        };
+
+        if (isCheckedPropertyPath != null)
+        {
+            checkBox.Bind(CheckBox.IsCheckedProperty, new Binding
+            {
+                Path = isCheckedPropertyPath,
+                Mode = BindingMode.TwoWay,
+            });
+        }
+
+        return checkBox;
+    }
+
+
+    public static TextBlock MakeLink(string text, IRelayCommand command)
+    {
+        var link = new TextBlock
+        {
+            Text = text,
+            Foreground = MakeLinkForeground(),
+            TextDecorations = TextDecorations.Underline,
+            Cursor = new Cursor(StandardCursorType.Hand),
+            Margin = new Thickness(0),
+            Padding = new Thickness(0),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        link.PointerPressed += (_, __) =>
+        {
+            if (command.CanExecute(null))
+            {
+                command.Execute(null);
+            }
+        };
+
+        return link;
+    }
+
+    public static SolidColorBrush MakeLinkForeground()
+    {
+        return new SolidColorBrush(Color.FromArgb(255, 30, 144, 255));
+    }
+
+    public static TextBlock MakeLink(string text, IRelayCommand command, object viewModel, string propertyTextPath)
+    {
+        var link = new TextBlock
+        {
+            Text = text,
+            Foreground = MakeLinkForeground(),
+            TextDecorations = TextDecorations.Underline,
+            Cursor = new Cursor(StandardCursorType.Hand),
+            Margin = new Thickness(0),
+            Padding = new Thickness(0),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        link.PointerPressed += (_, __) =>
+        {
+            if (command.CanExecute(null))
+            {
+                command.Execute(null);
+            }
+        };
+
+        link.Bind(TextBlock.TextProperty, new Binding
+        {
+            Path = propertyTextPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return link;
+    }
+
+    public static TControl WithMarginRight<TControl>(this TControl control, int marginRight) where TControl : Layoutable
+    {
+        var m = control.Margin;
+        control.Margin = new Thickness(m.Left, m.Top, marginRight, m.Bottom);
+        return control;
+    }
+
+    public static TControl WithMarginLeft<TControl>(this TControl control, int marginLeft) where TControl : Layoutable
+    {
+        var m = control.Margin;
+        control.Margin = new Thickness(marginLeft, m.Top, m.Right, m.Bottom);
+        return control;
+    }
+
+    public static TControl WithMargin<TControl>(this TControl control, int margin) where TControl : Layoutable
+    {
+        control.Margin = new Thickness(margin);
+        return control;
+    }
+
+    public static TControl WithMarginTop<TControl>(this TControl control, int marginTop) where TControl : Layoutable
+    {
+        var m = control.Margin;
+        control.Margin = new Thickness(m.Left, marginTop, m.Right, m.Bottom);
+        return control;
+    }
+
+    public static TControl WithMarginBottom<TControl>(this TControl control, int marginBottom) where TControl : Layoutable
+    {
+        var m = control.Margin;
+        control.Margin = new Thickness(m.Left, m.Top, m.Right, marginBottom);
+        return control;
+    }
+
+    public static TControl WithMargin<TControl>(this TControl control, int left, int top, int right, int bottom) where TControl : Layoutable
+    {
+        control.Margin = new Thickness(left, top, right, bottom);
+        return control;
+    }
+
+    public static TControl WithWidth<TControl>(this TControl control, double width) where TControl : Layoutable
+    {
+        control.Width = width;
+        return control;
+    }
+
+    public static TControl WithHeight<TControl>(this TControl control, double height) where TControl : Layoutable
+    {
+        control.Height = height;
+        return control;
+    }
+
+    public static TControl WithMinWidth<TControl>(this TControl control, double minWidth) where TControl : Layoutable
+    {
+        control.MinWidth = minWidth;
+        return control;
+    }
+
+    public static TControl WithMinHeight<TControl>(this TControl control, double minHeight) where TControl : Layoutable
+    {
+        control.MinHeight = minHeight;
+        return control;
+    }
+
+    public static TControl WithAlignmentLeft<TControl>(this TControl control) where TControl : Layoutable
+    {
+        control.HorizontalAlignment = HorizontalAlignment.Left;
+        return control;
+    }
+
+    public static TControl WithAlignmentRight<TControl>(this TControl control) where TControl : Layoutable
+    {
+        control.HorizontalAlignment = HorizontalAlignment.Right;
+        return control;
+    }
+
+    public static TControl WithAlignmentCenter<TControl>(this TControl control) where TControl : Layoutable
+    {
+        control.HorizontalAlignment = HorizontalAlignment.Center;
+        return control;
+    }
+
+    public static TControl WithAlignmentTop<TControl>(this TControl control) where TControl : Layoutable
+    {
+        control.VerticalAlignment = VerticalAlignment.Top;
+        return control;
+    }
+
+    public static TControl WithAlignmentBottom<TControl>(this TControl control) where TControl : Layoutable
+    {
+        control.VerticalAlignment = VerticalAlignment.Bottom;
+        return control;
+    }
+
+    public static TControl WithLeftAlignment<TControl>(this TControl control) where TControl : Layoutable
+    {
+        control.HorizontalAlignment = HorizontalAlignment.Left;
+        return control;
+    }
+
+    public static TControl WithRightAlignment<TControl>(this TControl control) where TControl : Layoutable
+    {
+        control.HorizontalAlignment = HorizontalAlignment.Right;
+        return control;
+    }
+
+    public static TControl WithTopAlignment<TControl>(this TControl control) where TControl : Layoutable
+    {
+        control.VerticalAlignment = VerticalAlignment.Top;
+        return control;
+    }
+
+    public static TControl WithCenterAlignment<TControl>(this TControl control) where TControl : Layoutable
+    {
+        control.VerticalAlignment = VerticalAlignment.Center;
+        return control;
+    }
+
+    public static TControl WithBottomAlignment<TControl>(this TControl control) where TControl : Layoutable
+    {
+        control.VerticalAlignment = VerticalAlignment.Bottom;
+        return control;
+    }
+
+    public static TextBlock WithBackgroundColor(this TextBlock control, IBrush brush)
+    {
+        control.Background = brush;
+        return control;
+    }
+
+    public static Button WithIconRight(this Button control, string iconName)
+    {
+        var (label, accessibleName) = MakeIconButtonLabel(DetachContent(control), new Thickness(0, 0, 4, 0));
+        var image = new ContentControl();
+        Attached.SetIcon(image, iconName);
+        var stackPanelApplyFixes = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Children = { label, image }
+        };
+
+        control.Content = stackPanelApplyFixes;
+
+        // Same as WithIconLeft: the panel content has no UIA name of its own, keep the text.
+        if (!string.IsNullOrEmpty(accessibleName))
+        {
+            AutomationProperties.SetName(control, accessibleName);
+        }
+
+        return control;
+    }
+
+    public static Button WithIconLeft(this Button control, string iconName)
+    {
+        var (label, accessibleName) = MakeIconButtonLabel(DetachContent(control), new Thickness(4, 0, 0, 0));
+        var image = new ContentControl();
+        Attached.SetIcon(image, iconName);
+        var stackPanelApplyFixes = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Children = { image, label }
+        };
+
+        control.Content = stackPanelApplyFixes;
+
+        // Replacing the text content with an icon+text panel loses the button's computed UIA
+        // name - keep the original text as the accessible name so screen readers still
+        // announce it (#11745/#12087 accessibility work).
+        if (!string.IsNullOrEmpty(accessibleName))
+        {
+            AutomationProperties.SetName(control, accessibleName);
+        }
+
+        return control;
+    }
+
+    /// <summary>
+    /// The label for an icon+text button. A button made by <see cref="MakeButton(string, IRelayCommand?, object?)"/>
+    /// from a label with an access key holds an <see cref="AccessText"/>, not a string: keep that
+    /// control so the Alt underline survives - flattening it with ToString() would print the type
+    /// name as the caption. The accessible name is the caption without the `_` marker.
+    /// </summary>
+    // An AccessText content is a logical child of the button; it has to leave the button before the
+    // icon panel adopts it, or it ends up in the panel with no logical parent and the window
+    // throws while attaching to the tree.
+    private static object? DetachContent(Button control)
+    {
+        var content = control.Content;
+        control.Content = null;
+        return content;
+    }
+
+    private static (TextBlock Label, string? AccessibleName) MakeIconButtonLabel(object? content, Thickness padding)
+    {
+        if (content is AccessText accessText)
+        {
+            accessText.Padding = padding;
+            return (accessText, ParseAccessKey(accessText.Text ?? string.Empty).Display);
+        }
+
+        var text = content?.ToString();
+        return (new TextBlock { Text = text, Padding = padding }, text);
+    }
+
+    public static Button WithCommandParameter<T>(this Button control, T parameter)
+    {
+        control.CommandParameter = parameter;
+        return control;
+    }
+
+    /// <summary>
+    /// Like WithIconLeft, but the text is bound to a view-model property instead of being fixed,
+    /// so the caption can change at runtime (e.g. "Download" vs "Re-download").
+    /// </summary>
+    /// <param name="accessibleNamePropertyPath">
+    /// Optional view-model property with a fuller name for screen readers than the caption -
+    /// a row of "Download" buttons needs "Download &lt;model&gt;" to tell them apart (#12087).
+    /// Defaults to the caption.
+    /// </param>
+    public static Button WithIconLeftBindText(this Button control, string iconName, string textPropertyPath,
+        string? accessibleNamePropertyPath = null)
+    {
+        var label = new TextBlock { Padding = new Thickness(4, 0, 0, 0) };
+        label.Bind(TextBlock.TextProperty, new Binding { Path = textPropertyPath });
+
+        var image = new ContentControl();
+        Attached.SetIcon(image, iconName);
+
+        control.Content = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Children = { image, label },
+        };
+
+        // A button whose content is a panel has no text for UI Automation to use, so its name
+        // falls back to the content's type and NVDA announces "Avalonia.Controls.StackPanel"
+        // (#12087). Bind the caption (or a fuller name) as the accessible name instead.
+        control.Bind(AutomationProperties.NameProperty, new Binding { Path = accessibleNamePropertyPath ?? textPropertyPath });
+
+        return control;
+    }
+
+    public static Button WithBindEnabled(this Button control, string isEnabledPropertyPath)
+    {
+        control.Bind(Button.IsEnabledProperty, new Binding
+        {
+            Path = isEnabledPropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static SplitButton WithBindEnabled(this SplitButton control, string isEnabledPropertyPath)
+    {
+        control.Bind(SplitButton.IsEnabledProperty, new Binding
+        {
+            Path = isEnabledPropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static SplitButton WithBindIsVisible(this SplitButton control, string isVisiblePropertyPath)
+    {
+        control.Bind(SplitButton.IsVisibleProperty, new Binding
+        {
+            Path = isVisiblePropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static ComboBox WithBindEnabled(this ComboBox control, string isEnabledPropertyPath)
+    {
+        control.Bind(ComboBox.IsEnabledProperty, new Binding
+        {
+            Path = isEnabledPropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static ComboBox WithBindVisible(this ComboBox control, string isVisiblePropertyPath)
+    {
+        control.Bind(ComboBox.IsVisibleProperty, new Binding
+        {
+            Path = isVisiblePropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static T WithHorizontalAlignmentStretch<T>(this T control) where T : Control
+    {
+        control.HorizontalAlignment = HorizontalAlignment.Stretch;
+        return control;
+    }
+
+    public static NumericUpDown WithBindEnabled(this NumericUpDown control, string isEnabledPropertyPath)
+    {
+        control.Bind(NumericUpDown.IsEnabledProperty, new Binding
+        {
+            Path = isEnabledPropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static Button WithBindContent(this Button control, string contentPropertyPath)
+    {
+        control.Bind(Button.ContentProperty, new Binding
+        {
+            Path = contentPropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static CheckBox WithBindEnabled(this CheckBox control, string isEnabledPropertyPath)
+    {
+        control.Bind(CheckBox.IsEnabledProperty, new Binding
+        {
+            Path = isEnabledPropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static TextBox WithBindEnabled(this TextBox control, string isEnabledPropertyPath)
+    {
+        control.Bind(TextBox.IsEnabledProperty, new Binding
+        {
+            Path = isEnabledPropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static TextBox WithBindEnabled(this TextBox control, string isEnabledPropertyPath, IValueConverter converter)
+    {
+        control.Bind(TextBox.IsEnabledProperty, new Binding
+        {
+            Converter = converter,
+            Path = isEnabledPropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static Button WithBindEnabled(this Button control, string isEnabledPropertyPath, IValueConverter converter)
+    {
+        control.Bind(Button.IsEnabledProperty, new Binding
+        {
+            Converter = converter,
+            Path = isEnabledPropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static TextBox WithBindIsVisible(this TextBox control, string isVisiblePropertyPath)
+    {
+        control.Bind(TextBox.IsVisibleProperty, new Binding
+        {
+            Path = isVisiblePropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static TextBox WithBindIsVisible(this TextBox control, string isEnabledPropertyPath,
+        IValueConverter converter)
+    {
+        control.Bind(TextBox.IsVisibleProperty, new Binding
+        {
+            Converter = converter,
+            Path = isEnabledPropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static Button WithBindIsVisible(this Button control, string isVisiblePropertyPath)
+    {
+        control.Bind(Button.IsVisibleProperty, new Binding
+        {
+            Path = isVisiblePropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static Button WithBindIsVisible(this Button control, object viewModel, string isVisiblePropertyPath)
+    {
+        control.DataContext = viewModel;
+        control.Bind(Button.IsVisibleProperty, new Binding
+        {
+            Path = isVisiblePropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static Button WithBindIsVisible(this Button control, string isVisiblePropertyPath, IValueConverter converter)
+    {
+        control.Bind(Button.IsVisibleProperty, new Binding
+        {
+            Path = isVisiblePropertyPath,
+            Mode = BindingMode.OneWay,
+            Converter = converter,
+        });
+
+        return control;
+    }
+
+    public static Border WithBindIsVisible(this Border control, string isVisiblePropertyPath, IValueConverter converter)
+    {
+        control.Bind(Border.IsVisibleProperty, new Binding
+        {
+            Path = isVisiblePropertyPath,
+            Mode = BindingMode.OneWay,
+            Converter = converter,
+        });
+
+        return control;
+    }
+
+    public static Border WithBindIsVisible(this Border control, string isVisiblePropertyPath)
+    {
+        control.Bind(Border.IsVisibleProperty, new Binding
+        {
+            Path = isVisiblePropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static T WithBindIsVisible<T>(this T control, string isVisiblePropertyPath) where T : Control
+    {
+        control.Bind(Visual.IsVisibleProperty, new Binding
+        {
+            Path = isVisiblePropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static T WithBindIsVisible<T>(this T control, object source, string isVisiblePropertyPath) where T : Control
+    {
+        control.Bind(Visual.IsVisibleProperty, new Binding(isVisiblePropertyPath)
+        {
+            Source = source,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static T WithBindIsEnabled<T>(this T control, string isEnabledPropertyPath) where T : Control
+    {
+        control.Bind(InputElement.IsEnabledProperty, new Binding
+        {
+            Path = isEnabledPropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static Button WithBindIsEnabled(this Button control, string isEnabledPropertyPath)
+    {
+        control.Bind(Button.IsEnabledProperty, new Binding
+        {
+            Path = isEnabledPropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static Button WithBindIsEnabled(this Button control, string isEnabledPropertyPath, IValueConverter converter)
+    {
+        control.Bind(Button.IsEnabledProperty, new Binding
+        {
+            Path = isEnabledPropertyPath,
+            Mode = BindingMode.OneWay,
+            Converter = converter,
+        });
+
+        return control;
+    }
+
+    public static ComboBox WithBindSelected(this ComboBox control, string selectedPropertyBinding)
+    {
+        control.Bind(ComboBox.SelectedItemProperty, new Binding
+        {
+            Path = selectedPropertyBinding,
+            Mode = BindingMode.TwoWay,
+        });
+
+        return control;
+    }
+
+    /// <summary>
+    /// For a combo box whose items are frame rates as <see cref="double"/>: print them with a
+    /// decimal point ("23.976") whatever the OS decimal separator, like the toolbar frame rate
+    /// combo (which holds invariant strings) - a bare double item would show "23,976" on a
+    /// comma-decimal locale. Applies to the dropdown items and the selection box alike.
+    /// </summary>
+    public static ComboBox WithFrameRateDisplay(this ComboBox control)
+    {
+        control.DisplayMemberBinding = new Binding(".")
+        {
+            StringFormat = "{0:0.###}",
+            ConverterCulture = CultureInfo.InvariantCulture,
+        };
+
+        return control;
+    }
+
+    public static ComboBox WithBindItemsSource(this ComboBox control, string itemsSourcePropertyBinding)
+    {
+        control.Bind(ItemsControl.ItemsSourceProperty, new Binding
+        {
+            Path = itemsSourcePropertyBinding,
+        });
+
+        return control;
+    }
+
+    public static TextBlock WithPadding(this TextBlock control, int padding)
+    {
+        control.Padding = new Thickness(padding);
+        return control;
+    }
+
+    /// <summary>
+    /// Scales a design-time font size by the user's "Font scale (%)" setting (#14812). Route every
+    /// explicit control font size through this so it follows the setting; the window-inherited
+    /// default is scaled by <see cref="UiTheme.ApplyScaleToWindow"/>. Icons undo this again via
+    /// the icon style in <see cref="UiTheme"/>, so icon sizes stay put.
+    /// </summary>
+    public static double ScaledFontSize(double fontSize)
+    {
+        return fontSize * UiTheme.FontScale;
+    }
+
+    /// <summary>
+    /// Design-time font size for controls that outlive a font scale change (the main window's
+    /// hint labels, which are not rebuilt in undocked mode). <see cref="UiTheme.ApplyScaleToWindow"/>
+    /// walks every open window and re-applies <see cref="ScaledFontSize"/> for each control
+    /// carrying this, so the new scale shows without a restart. Set it next to FontSize:
+    /// <c>FontSize = UiUtil.ScaledFontSize(12), [UiUtil.DesignFontSizeProperty] = 12</c>.
+    /// </summary>
+    public static readonly AttachedProperty<double> DesignFontSizeProperty =
+        AvaloniaProperty.RegisterAttached<Control, double>("DesignFontSize", typeof(UiUtil), double.NaN);
+
+    public static TextBlock WithFontSize(this TextBlock control, double fontSize)
+    {
+        control.FontSize = ScaledFontSize(fontSize);
+        return control;
+    }
+
+    public static StackPanel WithSpacing(this StackPanel control, int spacing)
+    {
+        control.Spacing = spacing;
+        return control;
+    }
+
+    public static Label HorizontalContentAlignmentCenter(this Label control)
+    {
+        control.HorizontalContentAlignment = HorizontalAlignment.Center;
+        return control;
+    }
+
+    public static Label WithBold(this Label control)
+    {
+        control.FontWeight = FontWeight.Bold;
+        return control;
+    }
+
+    public static Label WithOpacity(this Label control, double opacity)
+    {
+        control.Opacity = opacity;
+        return control;
+    }
+
+    public static Label WithFontSize(this Label control, int fontSize)
+    {
+        control.FontSize = ScaledFontSize(fontSize);
+        return control;
+    }
+
+    public static Button WithFontSize(this Button control, double fontSize)
+    {
+        control.FontSize = ScaledFontSize(fontSize);
+        return control;
+    }
+
+    public static Button Compact(this Button control)
+    {
+        var m = control.Padding;
+        control.Padding = new Thickness(8, m.Top, 8, m.Bottom);
+        control.MinWidth = 0;
+        return control;
+    }
+
+    public static Button WithPadding(this Button control, int padding)
+    {
+        control.Padding = new Thickness(padding);
+        return control;
+    }
+
+    public static Button WithBold(this Button control)
+    {
+        control.FontWeight = FontWeight.Bold;
+        return control;
+    }
+
+    /// <summary>
+    /// Sets an accessible name (UIA Name) so a screen reader announces this control instead of a bare
+    /// "edit"/"combo box"/"button". Use when there is no separate visible label to point at (#11745).
+    /// </summary>
+    public static T WithAccessibleName<T>(this T control, string name) where T : Control
+    {
+        AutomationProperties.SetName(control, name);
+        return control;
+    }
+
+    /// <summary>
+    /// Decorates a search/filter box with a magnifier icon on the left and an "x" button on the
+    /// right that clears the text. The button only shows while there is text, is not a tab stop,
+    /// and returns focus to the box. Clearing sets Text, so bindings and TextChanged handlers
+    /// re-run the filter just as when the user deletes the text.
+    /// </summary>
+    public static T WithSearchAndClearIcons<T>(this T textBox) where T : TextBox
+    {
+        textBox.InnerLeftContent = new Icon
+        {
+            Value = IconNames.Find,
+            FontSize = 14,
+            Margin = new Thickness(6, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = GetTextColor(0.6d),
+        };
+
+        var clearButton = new Button
+        {
+            Content = new Icon
+            {
+                Value = IconNames.Close,
+                FontSize = 14,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Foreground = GetTextColor(0.6d),
+            },
+            Width = 24,
+            Height = 24,
+            Padding = new Thickness(0),
+            Margin = new Thickness(0, 0, 2, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Background = Brushes.Transparent,
+            BorderBrush = null,
+            Focusable = false,
+            Cursor = new Cursor(StandardCursorType.Hand),
+        }.WithAccessibleName(Se.Language.General.Clear);
+
+        // Explicit Source: inner content only gets a DataContext once the TextBox template is applied.
+        clearButton.Bind(Visual.IsVisibleProperty, new Binding(nameof(TextBox.Text)) { Source = textBox, Converter = StringConverters.IsNotNullOrEmpty });
+        if (Se.Settings.Appearance.ShowHints)
+        {
+            ToolTip.SetTip(clearButton, Se.Language.General.Clear);
+        }
+
+        clearButton.Click += (_, _) =>
+        {
+            textBox.Text = string.Empty;
+            textBox.Focus();
+        };
+
+        textBox.InnerRightContent = clearButton;
+        return textBox;
+    }
+
+    /// <summary>
+    /// Links this control to an existing visible label so a screen reader announces the label as the
+    /// control's name (UIA LabeledBy). Prefer this over a hard-coded name when a label already exists,
+    /// as it stays correct for bound/localized label text (#11745).
+    /// </summary>
+    public static T WithLabeledBy<T>(this T control, Control label) where T : Control
+    {
+        AutomationProperties.SetLabeledBy(control, label);
+        return control;
+    }
+
+    public static Button WithParameter(this Button control, object parameter)
+    {
+        control.CommandParameter = parameter;
+        return control;
+    }
+
+    public static StackPanel MakeButtonBar(params Control[] buttons)
+    {
+        var stackPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Margin = new Thickness(10, 20, 10, 10),
+            Spacing = 0,
+            Height = double.NaN, // Allow it to grow vertically if needed
+        };
+
+        stackPanel.Children.AddRange(buttons);
+
+        return stackPanel;
+    }
+
+    public static StackPanel MakeControlBarLeft(params Control[] buttons)
+    {
+        var stackPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Margin = new Thickness(10),
+            Spacing = 0,
+        };
+
+        stackPanel.Children.AddRange(buttons);
+
+        return stackPanel;
+    }
+
+    public static Border MakeSeparatorForHorizontal(object vm)
+    {
+        return new Border
+        {
+            DataContext = vm,
+            Width = 1,
+            Background = GetBorderBrush(),
+            Margin = new Thickness(5, 5, 5, 5),
+            VerticalAlignment = VerticalAlignment.Stretch,
+        };
+    }
+
+    private static ImageBrush? _checkerboardBrush;
+
+    /// <summary>
+    /// Theme-independent checkerboard backdrop for image previews whose content can be pure
+    /// white, pure black or transparent (e.g. OCR bitmaps and pre-processing output). Two
+    /// mid-tone grays so both extremes stay visible in light and dark theme (issue #12692).
+    /// </summary>
+    public static ImageBrush GetCheckerboardBrush()
+    {
+        if (_checkerboardBrush != null)
+        {
+            return _checkerboardBrush;
+        }
+
+        const int tileSize = 16; // 2x2 squares of 8px
+        const int squareSize = tileSize / 2;
+        var bitmap = new Avalonia.Media.Imaging.WriteableBitmap(
+            new PixelSize(tileSize, tileSize),
+            new Vector(96, 96),
+            PixelFormat.Bgra8888,
+            AlphaFormat.Opaque);
+        using (var frameBuffer = bitmap.Lock())
+        {
+            unsafe
+            {
+                var pixels = (uint*)frameBuffer.Address;
+                for (var y = 0; y < tileSize; y++)
+                {
+                    for (var x = 0; x < tileSize; x++)
+                    {
+                        var isDark = (x / squareSize + y / squareSize) % 2 == 0;
+                        pixels[y * frameBuffer.RowBytes / 4 + x] = isDark ? 0xFF666666 : 0xFF999999;
+                    }
+                }
+            }
+        }
+
+        _checkerboardBrush = new ImageBrush(bitmap)
+        {
+            TileMode = TileMode.Tile,
+            DestinationRect = new RelativeRect(0, 0, tileSize, tileSize, RelativeUnit.Absolute),
+        };
+        return _checkerboardBrush;
+    }
+
+    public static Border MakeBorderForControl(Control control)
+    {
+        return new Border
+        {
+            Child = control,
+            BorderThickness = new Thickness(1),
+            BorderBrush = GetTextColor(0.3d),
+            Padding = new Thickness(5),
+            CornerRadius = new CornerRadius(CornerRadius),
+        };
+    }
+
+    public static Border MakeBorderForControlNoPadding(Control control)
+    {
+        return new Border
+        {
+            Child = control,
+            BorderThickness = new Thickness(1),
+            BorderBrush = GetTextColor(0.3d),
+            CornerRadius = new CornerRadius(CornerRadius),
+        };
+    }
+
+    public static bool IsScrollBarSource(RoutedEventArgs e)
+    {
+        var current = e.Source as Control;
+        while (current != null)
+        {
+            if (current is ScrollBar)
+            {
+                return true;
+            }
+            current = current.Parent as Control;
+        }
+        return false;
+    }
+
+    public static T BindIsVisible<T>(this T control, object vm, string visibilityPropertyPath) where T : Visual
+    {
+        control.DataContext = vm;
+        control.Bind(Visual.IsVisibleProperty, new Binding
+        {
+            Path = visibilityPropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static T BindText<T>(this T control, object vm, string textPropertyPath) where T : TextBox
+    {
+        control.DataContext = vm;
+        control.Bind(TextBox.TextProperty, new Binding
+        {
+            Path = textPropertyPath,
+            Mode = BindingMode.TwoWay,
+        });
+
+        return control;
+    }
+
+    public static WindowIcon? GetSeIcon()
+    {
+        return new WindowIcon(AssetLoader.Open(new Uri("avares://SubtitleEdit/Assets/se.ico")));
+    }
+
+    public static Control RemoveControlFromParent(this Control control)
+    {
+        if (control.Parent is Panel parent)
+        {
+            parent.Children.Remove(control);
+        }
+        else if (control.Parent is Decorator decorator)
+        {
+            if (decorator.Child == control)
+            {
+                decorator.Child = null;
+            }
+        }
+        else if (control.Parent is ContentControl contentControl)
+        {
+            if (contentControl.Content == control)
+            {
+                contentControl.Content = null;
+            }
+        }
+
+        return control;
+    }
+
+    public static Control AddControlToParent(this Control control, Control parent)
+    {
+        if (parent is Panel panel)
+        {
+            panel.Children.Add(control);
+        }
+        else if (parent is Decorator decorator)
+        {
+            decorator.Child = control;
+        }
+        else if (parent is ContentControl contentControl2)
+        {
+            contentControl2.Content = control;
+        }
+
+        return control;
+    }
+
+    internal static Thickness MakeWindowMargin()
+    {
+        return new Thickness(WindowMarginWidth, WindowMarginWidth * 2, WindowMarginWidth, WindowMarginWidth);
+    }
+
+    // Property lookups here run on every swatch read/refresh; cache PropertyInfo per
+    // (declaring type, property name) so repeated reflection resolves are dictionary hits.
+    private static readonly Dictionary<(Type Type, string Name), PropertyInfo?> PropertyInfoCache = new();
+
+    private static PropertyInfo? GetCachedProperty(object owner, string name)
+    {
+        var key = (owner.GetType(), name);
+        if (!PropertyInfoCache.TryGetValue(key, out var pi))
+        {
+            pi = key.Item1.GetProperty(name, BindingFlags.Public | BindingFlags.Instance);
+            PropertyInfoCache[key] = pi;
+        }
+
+        return pi;
+    }
+
+    internal static Button MakeColorPickerButton(object source, string colorPropertyPath, bool showAlpha = true)
+    {
+        var pathParts = colorPropertyPath.Split('.');
+
+        (object? Owner, PropertyInfo? Property) ResolveLeaf()
+        {
+            object? current = source;
+            for (var i = 0; i < pathParts.Length - 1; i++)
+            {
+                if (current == null)
+                {
+                    return (null, null);
+                }
+                var pi = GetCachedProperty(current, pathParts[i]);
+                current = pi?.GetValue(current);
+            }
+            if (current == null)
+            {
+                return (null, null);
+            }
+            var leafProp = GetCachedProperty(current, pathParts[^1]);
+            return (current, leafProp);
+        }
+
+        Color ReadColor()
+        {
+            var (owner, prop) = ResolveLeaf();
+            return prop?.GetValue(owner) is Color c ? c : Colors.White;
+        }
+
+        var colorSwatch = new Border
+        {
+            Width = 30,
+            Height = 20,
+            CornerRadius = new CornerRadius(CornerRadius),
+            BorderThickness = new Thickness(1),
+            BorderBrush = new SolidColorBrush(Colors.Gray),
+            Background = new SolidColorBrush(ReadColor()),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        var button = new Button
+        {
+            Content = colorSwatch,
+            Padding = new Thickness(4, 2),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        var subscriptions = new List<(INotifyPropertyChanged Source, PropertyChangedEventHandler Handler)>();
+
+        void RefreshSwatch()
+        {
+            var updated = ReadColor();
+            if (Dispatcher.UIThread.CheckAccess())
+            {
+                colorSwatch.Background = new SolidColorBrush(updated);
+            }
+            else
+            {
+                Dispatcher.UIThread.Post(() => colorSwatch.Background = new SolidColorBrush(updated));
+            }
+        }
+
+        void Unsubscribe()
+        {
+            foreach (var (src, handler) in subscriptions)
+            {
+                src.PropertyChanged -= handler;
+            }
+            subscriptions.Clear();
+        }
+
+        void Subscribe()
+        {
+            object? current = source;
+            for (var i = 0; i < pathParts.Length; i++)
+            {
+                if (current is INotifyPropertyChanged inpc)
+                {
+                    var partName = pathParts[i];
+                    var isLeaf = i == pathParts.Length - 1;
+                    PropertyChangedEventHandler handler = (_, e) =>
+                    {
+                        if (!string.IsNullOrEmpty(e.PropertyName) && e.PropertyName != partName)
+                        {
+                            return;
+                        }
+                        if (isLeaf)
+                        {
+                            RefreshSwatch();
+                        }
+                        else
+                        {
+                            Unsubscribe();
+                            Subscribe();
+                            RefreshSwatch();
+                        }
+                    };
+                    inpc.PropertyChanged += handler;
+                    subscriptions.Add((inpc, handler));
+                }
+                if (i < pathParts.Length - 1)
+                {
+                    if (current == null)
+                    {
+                        break;
+                    }
+                    var pi = GetCachedProperty(current, pathParts[i]);
+                    current = pi?.GetValue(current);
+                }
+            }
+        }
+
+        Subscribe();
+        button.DetachedFromVisualTree += (_, _) => Unsubscribe();
+
+        button.Click += async (_, _) =>
+        {
+            if (TopLevel.GetTopLevel(button) is not Window window)
+            {
+                return;
+            }
+
+            var (owner, prop) = ResolveLeaf();
+            if (owner == null || prop == null)
+            {
+                return;
+            }
+
+            var currentColor = prop.GetValue(owner) is Color cc ? cc : Colors.White;
+            var vm = new ColorPickerViewModel();
+            vm.Initialize(currentColor);
+            vm.ShowAlpha = showAlpha;
+            var pickerWindow = new ColorPickerWindow(vm);
+            await WindowService.ShowModalAsync(window, pickerWindow);
+
+            if (vm.OkPressed)
+            {
+                prop.SetValue(owner, vm.SelectedColor);
+                colorSwatch.Background = new SolidColorBrush(vm.SelectedColor);
+            }
+        };
+
+        return button;
+    }
+
+    internal static Label MakeLabel(string text = "")
+    {
+        return new Label
+        {
+            Content = text,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+    }
+
+    internal static Label MakeLabel<TViewModel>(string text, Expression<Func<TViewModel, bool>> isVisibleExpression)
+    {
+        var label = new Label
+        {
+            Content = text,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        label.Bind(
+            Label.IsVisibleProperty,
+            CompiledBinding.Create(
+                isVisibleExpression,
+                mode: BindingMode.OneWay
+            )
+        );
+
+        return label;
+    }
+
+    internal static Label MakeLabel(Binding binding)
+    {
+        var label = new Label
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        label.Bind(Label.ContentProperty, binding);
+
+        return label;
+    }
+
+    /// <summary>
+    /// Creates a label bound to a (possibly long) file name or path. The displayed text
+    /// is truncated in the middle with an ellipsis so the start and the file name stay
+    /// visible, the width is capped so a long path can't force a fixed-size window to grow,
+    /// and the full value is shown as a tooltip.
+    /// </summary>
+    internal static Label MakeFilePathLabel(object viewModel, string fullPathPropertyPath, int maxLength = 50, int maxWidth = 400)
+    {
+        var label = new Label
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            MaxWidth = maxWidth,
+            DataContext = viewModel,
+        };
+
+        label.Bind(Label.ContentProperty, new Binding
+        {
+            Path = fullPathPropertyPath,
+            Mode = BindingMode.OneWay,
+            Converter = new MiddleEllipsisConverter(),
+            ConverterParameter = maxLength,
+        });
+
+        label.Bind(ToolTip.TipProperty, new Binding
+        {
+            Path = fullPathPropertyPath,
+            Mode = BindingMode.OneWay,
+            Converter = new NullOrEmptyToNullConverter(),
+        });
+
+        return label;
+    }
+
+    /// <summary>
+    /// Binds a text block (e.g. a link) to a (possibly long) file name or path. The displayed
+    /// text is truncated in the middle with an ellipsis so the start and the file name stay
+    /// visible, the width is capped so a long path can't force a fixed-size window to grow,
+    /// and the full value is shown as a tooltip.
+    /// </summary>
+    internal static TextBlock WithFilePathText(this TextBlock control, object viewModel, string fullPathPropertyPath, int maxLength = 50, int maxWidth = 400)
+    {
+        control.MaxWidth = maxWidth;
+        control.DataContext = viewModel;
+
+        control.Bind(TextBlock.TextProperty, new Binding
+        {
+            Path = fullPathPropertyPath,
+            Mode = BindingMode.OneWay,
+            Converter = new MiddleEllipsisConverter(),
+            ConverterParameter = maxLength,
+        });
+
+        control.Bind(ToolTip.TipProperty, new Binding
+        {
+            Path = fullPathPropertyPath,
+            Mode = BindingMode.OneWay,
+            Converter = new NullOrEmptyToNullConverter(),
+        });
+
+        return control;
+    }
+
+    internal static RadioButton MakeRadioButton(string text, object viewModel, string isCheckedPropertyPath)
+    {
+        return MakeRadioButton(text, viewModel, isCheckedPropertyPath, null);
+    }
+
+    internal static RadioButton MakeRadioButton(string text, object viewModel, string isCheckedPropertyPath,
+        string? groupName)
+    {
+        var control = new RadioButton
+        {
+            Content = text,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            DataContext = viewModel,
+            GroupName = groupName,
+        };
+
+        if (isCheckedPropertyPath != null)
+        {
+            control.Bind(RadioButton.IsCheckedProperty, new Binding
+            {
+                Path = isCheckedPropertyPath,
+                Mode = BindingMode.TwoWay,
+            });
+        }
+
+        return control;
+    }
+
+    public static NumericUpDown MakeNumericUpDownInt(int min, int max, int defaultValue, double width, object viewModel,
+        string? propertyValuePath = null, string? propertyIsVisiblePath = null)
+    {
+        var control = new NumericUpDown
+        {
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            DataContext = viewModel,
+            Minimum = min,
+            Maximum = max,
+            Width = width,
+            Increment = 1,
+            FormatString = "F0",
+            Foreground = GetTextColor(),
+        };
+
+        if (propertyValuePath != null)
+        {
+            control.Bind(NumericUpDown.ValueProperty, new Binding
+            {
+                Path = propertyValuePath,
+                Mode = BindingMode.TwoWay,
+                Converter = new NullableIntConverter { DefaultValue = defaultValue },
+            });
+        }
+
+        if (propertyIsVisiblePath != null)
+        {
+            control.Bind(NumericUpDown.IsVisibleProperty, new Binding
+            {
+                Path = propertyIsVisiblePath,
+                Mode = BindingMode.OneWay,
+            });
+        }
+
+        MakeNumeriUpDownMouseWheelHandler(control);
+        ForwardAutomationNameToInnerTextBox(control);
+
+        return control;
+    }
+
+    // Like MakeNumericUpDownInt but for double-typed (double?) view-model properties.
+    // Uses NullableDoubleConverter so the actual value round-trips; NullableIntConverter
+    // would fall back to its DefaultValue whenever the source is a double (not an int).
+    public static NumericUpDown MakeNumericUpDownDouble(int min, int max, double defaultValue, double width, object viewModel,
+        string? propertyValuePath = null, string? propertyIsVisiblePath = null)
+    {
+        var control = new NumericUpDown
+        {
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            DataContext = viewModel,
+            Minimum = min,
+            Maximum = max,
+            Width = width,
+            Increment = 1,
+            FormatString = "F0",
+            Foreground = GetTextColor(),
+        };
+
+        if (propertyValuePath != null)
+        {
+            control.Bind(NumericUpDown.ValueProperty, new Binding
+            {
+                Path = propertyValuePath,
+                Mode = BindingMode.TwoWay,
+                Converter = new NullableDoubleConverter { DefaultValue = defaultValue },
+            });
+        }
+
+        if (propertyIsVisiblePath != null)
+        {
+            control.Bind(NumericUpDown.IsVisibleProperty, new Binding
+            {
+                Path = propertyIsVisiblePath,
+                Mode = BindingMode.OneWay,
+            });
+        }
+
+        MakeNumeriUpDownMouseWheelHandler(control);
+        ForwardAutomationNameToInnerTextBox(control);
+
+        return control;
+    }
+
+    public static NumericUpDown MakeNumericUpDownTwoDecimals(decimal min, decimal max, double width, object viewModel,
+        string? propertyValuePath = null, string? propertyIsVisiblePath = null, decimal defaultValue = 0)
+    {
+        var control = new NumericUpDown
+        {
+            Width = width,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            DataContext = viewModel,
+            Minimum = min,
+            Maximum = max,
+            Increment = 0.01m,
+            FormatString = "F2", // Force two decimals
+            TextConverter = new NumericUpDownDecimalTextConverter("F2"),
+            Foreground = GetTextColor(),
+        };
+
+        if (propertyValuePath != null)
+        {
+            control.Bind(NumericUpDown.ValueProperty, new Binding
+            {
+                Path = propertyValuePath,
+                Mode = BindingMode.TwoWay,
+                Converter = new NullableDecimalConverter { DefaultValue = defaultValue },
+            });
+        }
+
+        if (propertyIsVisiblePath != null)
+        {
+            control.Bind(NumericUpDown.IsVisibleProperty, new Binding
+            {
+                Path = propertyIsVisiblePath,
+                Mode = BindingMode.OneWay,
+            });
+        }
+
+        MakeNumeriUpDownMouseWheelHandler(control);
+        ForwardAutomationNameToInnerTextBox(control);
+
+        return control;
+    }
+
+    public static NumericUpDown MakeNumericUpDownThreeDecimals(decimal min, decimal max, double width, object viewModel,
+        string? propertyValuePath = null, string? propertyIsVisiblePath = null)
+    {
+        var control = new NumericUpDown
+        {
+            Width = width,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            DataContext = viewModel,
+            Minimum = min,
+            Maximum = max,
+            Increment = 0.01m,
+            FormatString = "F3", // Force three decimals
+            TextConverter = new NumericUpDownDecimalTextConverter("F3"),
+        };
+
+        if (propertyValuePath != null)
+        {
+            control.Bind(NumericUpDown.ValueProperty, new Binding
+            {
+                Path = propertyValuePath,
+                Mode = BindingMode.TwoWay,
+            });
+        }
+
+        if (propertyIsVisiblePath != null)
+        {
+            control.Bind(NumericUpDown.IsVisibleProperty, new Binding
+            {
+                Path = propertyIsVisiblePath,
+                Mode = BindingMode.OneWay,
+            });
+        }
+
+        MakeNumeriUpDownMouseWheelHandler(control);
+        ForwardAutomationNameToInnerTextBox(control);
+
+        return control;
+    }
+
+    public static NumericUpDown MakeNumericUpDownOneDecimal(decimal min, decimal max, double width, object viewModel,
+        string? propertyValuePath = null, string? propertyIsVisiblePath = null, decimal defaultValue = 0)
+    {
+        var control = new NumericUpDown
+        {
+            Width = width,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            DataContext = viewModel,
+            Minimum = min,
+            Maximum = max,
+            Increment = 0.1m,
+            FormatString = "F1",
+            TextConverter = new NumericUpDownDecimalTextConverter("F1"),
+        };
+
+        if (propertyValuePath != null)
+        {
+            control.Bind(NumericUpDown.ValueProperty, new Binding
+            {
+                Path = propertyValuePath,
+                Mode = BindingMode.TwoWay,
+                Converter = new NullableDecimalConverter { DefaultValue = defaultValue },
+            });
+        }
+
+        if (propertyIsVisiblePath != null)
+        {
+            control.Bind(NumericUpDown.IsVisibleProperty, new Binding
+            {
+                Path = propertyIsVisiblePath,
+                Mode = BindingMode.OneWay,
+            });
+        }
+
+        MakeNumeriUpDownMouseWheelHandler(control);
+        ForwardAutomationNameToInnerTextBox(control);
+
+        return control;
+    }
+
+    /// <summary>
+    /// Lets the mouse wheel step a <see cref="NumericUpDown"/> - but only while it has keyboard
+    /// focus. Without that guard, scrolling a dialog with the pointer merely passing over a numeric
+    /// field silently changed the value and swallowed the scroll, so e.g. "Waveform text font size"
+    /// walked down to its minimum of 10 while the user scrolled the settings page (issue #12864).
+    /// </summary>
+    private static void MakeNumeriUpDownMouseWheelHandler(NumericUpDown control)
+    {
+        control.AddHandler(InputElement.PointerWheelChangedEvent, (s, e) =>
+        {
+            if (!control.IsKeyboardFocusWithin)
+            {
+                return;
+            }
+
+            var current = control.Value ?? Math.Clamp(0m, control.Minimum, control.Maximum);
+            control.Value = Math.Clamp(current + (e.Delta.Y > 0 ? control.Increment : -control.Increment),
+                                        control.Minimum,
+                                        control.Maximum);
+            e.Handled = true;
+        });
+    }
+
+    /// <summary>
+    /// Forwards the accessible name (and LabeledBy link) set on a <see cref="NumericUpDown"/>
+    /// to its inner PART_TextBox. The text box is the element that actually receives keyboard focus,
+    /// so without this a screen reader would announce the focused field with no name
+    /// (issue #11553). Callers just set <c>AutomationProperties.Name</c> on the control.
+    /// </summary>
+    private static void ForwardAutomationNameToInnerTextBox(NumericUpDown control)
+    {
+        control.TemplateApplied += (_, e) =>
+        {
+            var textBox = e.NameScope.Find<TextBox>("PART_TextBox");
+            textBox?.Bind(AutomationProperties.NameProperty, control.GetObservable(AutomationProperties.NameProperty));
+            textBox?.Bind(AutomationProperties.LabeledByProperty, control.GetObservable(AutomationProperties.LabeledByProperty));
+
+            var spinner = e.NameScope.Find<ButtonSpinner>("PART_Spinner");
+            if (spinner != null)
+            {
+                spinner.TemplateApplied += (_, spinnerArgs) => NameSpinnerButtons(spinnerArgs.NameScope);
+            }
+        };
+    }
+
+    /// <summary>
+    /// The Fluent ButtonSpinner template gives its increase/decrease buttons a PathIcon as
+    /// content and no accessible name, so a screen reader announced them as
+    /// "Avalonia.Controls.PathIcon button" (#12087). Name them, and take them out of the tab
+    /// order: the text box already changes the value with the Up/Down arrows, so the two
+    /// extra tab stops per field only added noise for keyboard users.
+    /// </summary>
+    private static void NameSpinnerButtons(INameScope nameScope)
+    {
+        if (nameScope.Find<InputElement>("PART_IncreaseButton") is { } increase)
+        {
+            AutomationProperties.SetName(increase, Se.Language.General.Increase);
+            KeyboardNavigation.SetIsTabStop(increase, false);
+        }
+
+        if (nameScope.Find<InputElement>("PART_DecreaseButton") is { } decrease)
+        {
+            AutomationProperties.SetName(decrease, Se.Language.General.Decrease);
+            KeyboardNavigation.SetIsTabStop(decrease, false);
+        }
+    }
+
+    public static Label WithBindText(this Label control, object viewModel, string contentPropertyPath)
+    {
+        control.DataContext = viewModel;
+        control.Bind(Label.ContentProperty, new Binding
+        {
+            Path = contentPropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static Label WithBindText<TViewModel>(
+     this Label control,
+     TViewModel viewModel,
+     Expression<Func<TViewModel, string>> contentExpression)
+    {
+        control.DataContext = viewModel;
+
+        control.Bind(
+            Label.ContentProperty,
+            CompiledBinding.Create<TViewModel, string>(
+                contentExpression,
+                mode: BindingMode.OneWay
+            )
+        );
+
+        return control;
+    }
+
+    public static Label WithBindText(this Label control, object viewModel, string contentPropertyPath, IValueConverter valueConverter)
+    {
+        control.DataContext = viewModel;
+        control.Bind(Label.ContentProperty, new Binding
+        {
+            Path = contentPropertyPath,
+            Mode = BindingMode.OneWay,
+            Converter = valueConverter,
+        });
+
+        return control;
+    }
+
+
+    public static Label WithBindText(this Label control, object viewModel, Binding binding)
+    {
+        control.DataContext = viewModel;
+        control.Bind(Label.ContentProperty, binding);
+
+        return control;
+    }
+
+    public static TextBlock WithBindText(this TextBlock control, object viewModel, string contentPropertyPath)
+    {
+        control.DataContext = viewModel;
+        control.Bind(TextBlock.TextProperty, new Binding
+        {
+            Path = contentPropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static Label WithBindVisible(this Label control, object viewModel, string visiblePropertyPath)
+    {
+        control.DataContext = viewModel;
+        control.Bind(Label.IsVisibleProperty, new Binding
+        {
+            Path = visiblePropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static Label WithBindVisible<TViewModel>(
+        this Label control,
+        TViewModel viewModel,
+        Expression<Func<TViewModel, bool>> visibleExpression)
+    {
+        control.DataContext = viewModel;
+
+        control.Bind(
+            Label.IsVisibleProperty,
+            CompiledBinding.Create(
+                visibleExpression,
+                mode: BindingMode.OneWay
+            )
+        );
+
+        return control;
+    }
+
+    public static Label WithBorderColorAsColor(this Label control)
+    {
+        control.Foreground = GetBorderBrush();
+
+        return control;
+    }
+
+    public static Grid WithBindVisible(this Grid control, object viewModel, string visiblePropertyPath)
+    {
+        control.DataContext = viewModel;
+        control.Bind(Grid.IsVisibleProperty, new Binding
+        {
+            Path = visiblePropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static TextBlock WithBindVisible(this TextBlock control, object viewModel, string visiblePropertyPath)
+    {
+        control.DataContext = viewModel;
+        control.Bind(TextBlock.IsVisibleProperty, new Binding
+        {
+            Path = visiblePropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static TextBlock WithBindEnabed(this TextBlock control, object viewModel, string visiblePropertyPath)
+    {
+        control.DataContext = viewModel;
+        control.Bind(TextBlock.IsEnabledProperty, new Binding
+        {
+            Path = visiblePropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static Label WithBindVisible(this Label control, object viewModel, string visiblePropertyPath,
+        IValueConverter converter)
+    {
+        control.DataContext = viewModel;
+        control.Bind(Label.IsVisibleProperty, new Binding
+        {
+            Path = visiblePropertyPath,
+            Mode = BindingMode.OneWay,
+            Converter = converter,
+        });
+
+        return control;
+    }
+
+    public static StackPanel WithBindVisible(this StackPanel control, object viewModel, string visiblePropertyPath)
+    {
+        control.DataContext = viewModel;
+        control.Bind(StackPanel.IsVisibleProperty, new Binding
+        {
+            Path = visiblePropertyPath,
+            Mode = BindingMode.OneWay,
+        });
+
+        return control;
+    }
+
+    public static StackPanel WithBindVisible(this StackPanel control, object viewModel, string visiblePropertyPath,
+        IValueConverter converter)
+    {
+        control.DataContext = viewModel;
+        control.Bind(StackPanel.IsVisibleProperty, new Binding
+        {
+            Path = visiblePropertyPath,
+            Mode = BindingMode.OneWay,
+            Converter = converter,
+        });
+
+        return control;
+    }
+
+    public static bool IsDarkTheme()
+    {
+        var app = Application.Current;
+        if (app == null)
+        {
+            return false;
+        }
+
+        var theme = app.ActualThemeVariant;
+        return theme == ThemeVariant.Dark;
+    }
+
+    private static readonly SKColor CheckerboardLight = new(0xFFEEEEEE);
+    private static readonly SKColor CheckerboardDark = new(0xFFBBBBBB);
+    private static readonly SKColor CheckerboardLightDarkTheme = new(0xFF333333);
+    private static readonly SKColor CheckerboardDarkDarkTheme = new(0xFF555555);
+
+    public static void DrawCheckerboardBackground(SKCanvas canvas, int width, int height, int squareSize = 16)
+    {
+        var isDarkTheme = IsDarkTheme();
+        var lightColor = isDarkTheme ? CheckerboardLightDarkTheme : CheckerboardLight;
+        var darkColor = isDarkTheme ? CheckerboardDarkDarkTheme : CheckerboardDark;
+
+        using (var lightPaint = new SKPaint { Color = lightColor, Style = SKPaintStyle.Fill })
+        using (var darkPaint = new SKPaint { Color = darkColor, Style = SKPaintStyle.Fill })
+        {
+            // Calculate number of squares needed
+            var cols = (int)Math.Ceiling((double)width / squareSize);
+            var rows = (int)Math.Ceiling((double)height / squareSize);
+
+            for (var row = 0; row < rows; row++)
+            {
+                for (var col = 0; col < cols; col++)
+                {
+                    // Determine if this square should be light or dark
+                    var isLight = (row + col) % 2 == 0;
+                    var paint = isLight ? lightPaint : darkPaint;
+
+                    // Calculate square position and size
+                    var rect = new SKRect(
+                        col * squareSize,
+                        row * squareSize,
+                        Math.Min((col + 1) * squareSize, width),
+                        Math.Min((row + 1) * squareSize, height)
+                    );
+
+                    canvas.DrawRect(rect, paint);
+                }
+            }
+        }
+    }
+
+    private static Styles? _uiFontStyles;
+
+    public static void SetFontName(string fontName)
+    {
+        if (Application.Current == null)
+        {
+            return;
+        }
+
+        // Replace (not append) the font styles, so Settings OK/Apply does not pile up styles and
+        // switching back to the default font takes effect without a restart.
+        if (_uiFontStyles != null)
+        {
+            Application.Current.Styles.Remove(_uiFontStyles);
+            _uiFontStyles = null;
+        }
+
+        if (string.IsNullOrEmpty(fontName))
+        {
+            return;
+        }
+
+        var fontFamily = FontFamilyHelper.Make(fontName);
+        var styles = new Styles();
+
+        // Set the font on windows and popup roots only and let it inherit down: CheckBox/RadioButton/
+        // ToggleSwitch/TabItem etc. render plain string content without a TextBlock, so a TextBlock
+        // style alone misses them (#15255). Do not style every TemplatedControl - that also hits
+        // template parts like a TextBox's ScrollViewer and cuts off a font set locally on the control
+        // (e.g. the subtitle text box font), so the TextPresenter fell back to the UI font.
+        styles.Add(new Style(x => x.Is<TopLevel>())
+        {
+            Setters =
+            {
+                new Setter(TopLevel.FontFamilyProperty, fontFamily),
+            }
+        });
+
+        styles.Add(new Style(x => x.Is<TextBlock>())
+        {
+            Setters =
+            {
+                new Setter(TextBlock.FontFamilyProperty, fontFamily),
+            }
+        });
+
+        // The source editor (source view, batch convert ASSA) draws its own text, so it is not
+        // covered by the styles above and would stay in Avalonia's default sans (#14457).
+        // The format preview sets a monospace family locally, which wins over this style.
+        styles.Add(new Style(x => x.OfType<SyntaxTextEditor>())
+        {
+            Setters =
+            {
+                new Setter(SyntaxTextEditor.FontFamilyProperty, fontFamily),
+            }
+        });
+
+        _uiFontStyles = styles;
+        Application.Current.Styles.Add(styles);
+    }
+
+    public static StackPanel MakeHorizontalPanel(params Control[] controls)
+    {
+        var stackPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            Spacing = 5,
+        };
+
+        stackPanel.Children.AddRange(controls);
+
+        return stackPanel;
+    }
+
+    public static StackPanel MakeVerticalPanel(params Control[] controls)
+    {
+        var stackPanel = new StackPanel
+        {
+            Orientation = Orientation.Vertical,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+            Spacing = 5,
+        };
+
+        stackPanel.Children.AddRange(controls);
+
+        return stackPanel;
+    }
+
+    public static Color LightenColor(Color color, byte adjustValue)
+    {
+        var r = (byte)Math.Min(255, color.R + adjustValue);
+        var g = (byte)Math.Min(255, color.G + adjustValue);
+        var b = (byte)Math.Min(255, color.B + adjustValue);
+
+        return Color.FromArgb(color.A, r, g, b);
+    }
+
+    internal static SeGridLinesVisibility GetGridLinesVisibility()
+    {
+        return Se.Settings.Appearance.GridLinesAppearance switch
+        {
+            nameof(SeGridLinesVisibility.Horizontal) => SeGridLinesVisibility.Horizontal,
+            nameof(SeGridLinesVisibility.Vertical) => SeGridLinesVisibility.Vertical,
+            nameof(SeGridLinesVisibility.All) => SeGridLinesVisibility.All,
+            _ => SeGridLinesVisibility.None,
+        };
+    }
+
+    internal static Color GetDarkThemeBackgroundColor()
+    {
+        return Se.Settings.Appearance.DarkModeBackgroundColor.FromHexToColor();
+    }
+
+    internal static void ReplaceControl(Control old, Control replacement)
+    {
+        var replacementParent = replacement.Parent;
+        if (replacementParent != null)
+        {
+            if (replacementParent is Panel panelReplacement)
+            {
+                panelReplacement.Children.Remove(replacement);
+            }
+            else if (replacementParent is ContentControl contentControl)
+            {
+                contentControl.Content = null;
+            }
+            else if (replacementParent is Grid grid)
+            {
+                grid.Children.Remove(replacement);
+            }
+        }
+
+        var parent = old.Parent;
+        if (parent is Panel panel)
+        {
+            var index = panel.Children.IndexOf(old);
+            if (index >= 0)
+            {
+                panel.Children[index] = replacement;
+            }
+        }
+        else if (parent is ContentControl contentControl)
+        {
+            contentControl.Content = replacement;
+        }
+        else if (parent is Grid grid)
+        {
+            var index = grid.Children.IndexOf(old);
+            if (index >= 0)
+            {
+                grid.Children[index] = replacement;
+            }
+        }
+    }
+
+    public static string? MakeToolTip(string hint, List<ShortCut> shortcuts, string shortcutName = "")
+    {
+        if (!Se.Settings.Appearance.ShowHints)
+        {
+            return null;
+        }
+
+        return string.Format(hint, MakeShortcutsString(shortcuts, shortcutName)).Trim();
+    }
+
+    public static string MakeShortcutsString(List<ShortCut> shortcuts, string shortcutName)
+    {
+        var shortcut = shortcuts.FirstOrDefault(s => s.Name == shortcutName);
+        var shortcutString = string.Empty;
+        if (shortcut is { Keys.Count: > 0 })
+        {
+            shortcutString = string.Join("+", ShortcutManager.OrderKeys(shortcut.Keys).Select(k => ShortcutManager.GetKeyDisplayName(k)));
+            shortcutString = $"({shortcutString})";
+        }
+
+        return shortcutString;
+    }
+
+    /// <summary>
+    /// Returns the file name of the subtitle currently open in the main window (empty when untitled).
+    /// Set once by the main view model so any dialog can put the file name in its title bar without
+    /// every view model having to take it as an extra Initialize parameter.
+    /// </summary>
+    internal static Func<string?>? CurrentSubtitleFileNameProvider { get; set; }
+
+    private static int _subtitleFileNameInTitleSuppressions;
+
+    /// <summary>
+    /// Session-only screen privacy mode (#15300), cycled via a shortcut so a screen recording or
+    /// screenshot does not reveal what is being worked on:
+    /// <see cref="ScreenPrivacyLevel.HideFileNames"/> keeps subtitle and video file names out of
+    /// the main window title, dialog titles and the video player;
+    /// <see cref="ScreenPrivacyLevel.HideFileNamesAndTexts"/> also blurs/hides the subtitle text.
+    /// </summary>
+    internal static ScreenPrivacyLevel ScreenPrivacy { get; set; }
+
+    internal static bool HideFileNames => ScreenPrivacy != ScreenPrivacyLevel.Off;
+
+    internal static bool HideTexts => ScreenPrivacy == ScreenPrivacyLevel.HideFileNamesAndTexts;
+
+    /// <summary>
+    /// Suppresses the file-name suffix for the dialogs opened inside the returned scope. Batch
+    /// convert reuses main-window dialogs as settings editors over a whole list of files - naming
+    /// the main window's subtitle in their title bar claims a file they have nothing to do with.
+    /// Keep the scope around the call that opens the dialog: the window is constructed
+    /// synchronously inside <c>ShowDialogAsync</c>, and the title is built in its constructor.
+    /// </summary>
+    internal static IDisposable SuppressSubtitleFileNameInTitle()
+    {
+        _subtitleFileNameInTitleSuppressions++;
+        return new TitleSuppression();
+    }
+
+    private sealed class TitleSuppression : IDisposable
+    {
+        private bool _disposed;
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            _subtitleFileNameInTitleSuppressions--;
+        }
+    }
+
+    /// <summary>
+    /// Window title with the current subtitle file name appended, e.g. "Auto-translate - my movie.srt".
+    /// The plain title is returned unchanged when no subtitle file is open, and inside a
+    /// <see cref="SuppressSubtitleFileNameInTitle"/> scope.
+    /// </summary>
+    internal static string MakeWindowTitle(string title)
+    {
+        if (_subtitleFileNameInTitleSuppressions > 0 || HideFileNames)
+        {
+            return title;
+        }
+
+        var fileName = CurrentSubtitleFileNameProvider?.Invoke();
+        if (string.IsNullOrEmpty(fileName))
+        {
+            return title;
+        }
+
+        return title + " - " + System.IO.Path.GetFileName(fileName);
+    }
+
+    /// <summary>
+    /// Gives <paramref name="control"/> the initial keyboard focus, once, the first time the
+    /// window is activated.
+    ///
+    /// The usual "Activated += delegate { x.Focus(); }" fires on <em>every</em> activation, so
+    /// Alt+Tabbing away and back yanks focus out of whatever the user had moved it to and
+    /// drops it back on the same control (#14313). Only the first activation is the initial
+    /// one; after that the window's own focus memory is the right answer.
+    /// </summary>
+    internal static void FocusOnFirstActivation(Window window, Control control)
+    {
+        FocusOnFirstActivation(window, () => control.Focus());
+    }
+
+    /// <summary>
+    /// Runs <paramref name="setInitialFocus"/> once, on the first activation of the window.
+    /// The overload to use when the initial focus is more than one control's Focus() call -
+    /// a row in a grid, a choice between two controls, a select-all before the focus.
+    /// </summary>
+    internal static void FocusOnFirstActivation(Window window, Action setInitialFocus)
+    {
+        void OnActivated(object? sender, EventArgs e)
+        {
+            window.Activated -= OnActivated;
+            setInitialFocus();
+        }
+
+        window.Activated += OnActivated;
+    }
+
+    internal static void InitializeWindow(Window window, string name)
+    {
+        window.Icon = GetSeIcon();
+        window.Name = name;
+
+        // Stop and dispose any background timers the view model owns the moment the window closes,
+        // whatever the close path (buttons, Escape, title-bar X, Alt+F4). Without this a running
+        // System.Timers.Timer keeps its (captured) view model - and the whole closed window - alive
+        // and ticking. Wired here, in the one place every window funnels through, so individual
+        // dialogs don't each have to remember to do it. (#12739)
+        // Guarded so the cleanup runs at most once per window even if Closed were ever raised
+        // again, keeping non-idempotent cleanups safe by construction. (#13100)
+        var cleanedUp = false;
+        var closed = false;
+        window.Closed += (_, _) =>
+        {
+            closed = true;
+            if (!cleanedUp && window.DataContext is IClosingCleanup cleanup)
+            {
+                cleanedUp = true;
+                cleanup.OnClosingCleanup();
+            }
+        };
+
+        // On small or high-DPI screens (e.g. 1920x1080 at 150% = 1280x853 DIPs of
+        // working area) SizeToContent windows can measure taller/wider than the screen,
+        // leaving the bottom buttons unreachable - Avalonia does not cap them itself.
+        // Clamp once when opened, and once more at Background priority so windows that
+        // re-fit themselves in a posted callback (LockMinimumToContentSize in e.g. the
+        // burn-in window runs at Loaded priority) get clamped again afterwards.
+        // Short-lived windows (e.g. the "please wait" window shown while extracting a
+        // Matroska track) can close before the posted callback runs; touching the window
+        // then throws ObjectDisposedException from the disposed platform impl. (#14161)
+        window.Opened += (_, _) =>
+        {
+            ClampToWorkingArea(window);
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (!closed)
+                {
+                    ClampToWorkingArea(window);
+                }
+            }, DispatcherPriority.Background);
+
+            // Name every input after its visible label for screen readers - once, here,
+            // instead of in each of the ~300 windows (#12087). See AccessibleLabels.
+            AccessibleLabels.Apply(window);
+        };
+    }
+
+    private static void ClampToWorkingArea(Window window)
+    {
+        if (window.WindowState != WindowState.Normal)
+        {
+            return;
+        }
+
+        var screen = window.Screens.ScreenFromWindow(window) ?? window.Screens.Primary;
+        if (screen == null)
+        {
+            return;
+        }
+
+        var scale = window.DesktopScaling;
+        if (scale <= 0)
+        {
+            return;
+        }
+
+        // Window sizes are in DIPs, the working area in physical pixels. Compare the
+        // full frame so OS decorations (title bar, borders) are accounted for.
+        var workingArea = screen.WorkingArea;
+        var frameSize = window.FrameSize ?? window.Bounds.Size;
+        var frameExtraWidth = Math.Max(0, frameSize.Width - window.Bounds.Width);
+        var frameExtraHeight = Math.Max(0, frameSize.Height - window.Bounds.Height);
+        var maxWidth = workingArea.Width / scale - frameExtraWidth;
+        var maxHeight = workingArea.Height / scale - frameExtraHeight;
+        if (maxWidth <= 0 || maxHeight <= 0)
+        {
+            return;
+        }
+
+        // A minimum size larger than the screen makes the window impossible to shrink
+        // (e.g. windows that lock MinWidth/MinHeight to their measured content size).
+        if (window.MinWidth > maxWidth)
+        {
+            window.MinWidth = maxWidth;
+        }
+
+        if (window.MinHeight > maxHeight)
+        {
+            window.MinHeight = maxHeight;
+        }
+
+        if (window.Bounds.Width > maxWidth || window.Bounds.Height > maxHeight)
+        {
+            // Stop content-driven sizing before shrinking, or the next measure pass
+            // would just grow the window back.
+            window.SizeToContent = SizeToContent.Manual;
+            if (window.Bounds.Width > maxWidth)
+            {
+                window.Width = maxWidth;
+            }
+
+            if (window.Bounds.Height > maxHeight)
+            {
+                window.Height = maxHeight;
+            }
+        }
+
+        // Keep the whole frame inside the working area so the bottom buttons stay
+        // reachable (a centered too-tall window overflows both top and bottom).
+        var frameWidthPx = (int)Math.Round(Math.Min(frameSize.Width, maxWidth + frameExtraWidth) * scale);
+        var frameHeightPx = (int)Math.Round(Math.Min(frameSize.Height, maxHeight + frameExtraHeight) * scale);
+        var maxX = workingArea.X + workingArea.Width - frameWidthPx;
+        var maxY = workingArea.Y + workingArea.Height - frameHeightPx;
+        var x = Math.Min(Math.Max(window.Position.X, workingArea.X), Math.Max(workingArea.X, maxX));
+        var y = Math.Min(Math.Max(window.Position.Y, workingArea.Y), Math.Max(workingArea.Y, maxY));
+        var position = new PixelPoint(x, y);
+        if (position != window.Position)
+        {
+            window.Position = position;
+        }
+    }
+
+    public static void SaveWindowPosition(Window? window)
+    {
+        if (!Se.Settings.General.RememberPositionAndSize || window == null || window.Name == null)
+        {
+            return;
+        }
+
+        var state = SeWindowPosition.SaveState(window);
+
+        // A minimized window reports where the OS parked it (-32000, -32000 on Windows), not
+        // where the user left it - and the undocked windows minimize instead of closing, so
+        // quitting with one of them minimized is common. Save where it was before. (#15106)
+        if (window.WindowState == WindowState.Minimized)
+        {
+            LastNormalWindowStates.TryGetValue(window, out var last);
+            var screenBounds = last?.Position is { } lastPosition
+                ? window.Screens.ScreenFromPoint(lastPosition)?.Bounds
+                : null;
+            if (!state.TryApplyStateBeforeMinimize(last?.Position, last?.State, screenBounds))
+            {
+                return; // nothing better known - keep what was saved earlier
+            }
+        }
+
+        var existing = Se.Settings.General.WindowPositions.FirstOrDefault(wp => wp.WindowName == state.WindowName);
+        if (existing != null)
+        {
+            Se.Settings.General.WindowPositions.Remove(existing);
+        }
+
+        Se.Settings.General.WindowPositions.Add(state);
+    }
+
+    private sealed class LastNormalWindowState
+    {
+        public PixelPoint? Position { get; set; }
+        public WindowState State { get; set; }
+    }
+
+    private static readonly ConditionalWeakTable<Window, LastNormalWindowState> LastNormalWindowStates = new();
+
+    /// <summary>
+    /// Remembers the position and state the window has while it is not minimized, so
+    /// <see cref="SaveWindowPosition"/> has something to save for a minimized window.
+    /// </summary>
+    private static void TrackLastNormalWindowState(Window window)
+    {
+        if (LastNormalWindowStates.TryGetValue(window, out _))
+        {
+            return;
+        }
+
+        var last = new LastNormalWindowState();
+        LastNormalWindowStates.Add(window, last);
+
+        void Update(PixelPoint position)
+        {
+            if (window.WindowState == WindowState.Minimized ||
+                SeWindowPosition.IsMinimizedPosition(position.X, position.Y))
+            {
+                return;
+            }
+
+            last.Position = position;
+            last.State = window.WindowState;
+        }
+
+        Update(window.Position);
+        window.PositionChanged += (_, e) => Update(e.Point);
+        window.PropertyChanged += (_, e) =>
+        {
+            if (e.Property == Window.WindowStateProperty)
+            {
+                Update(window.Position);
+            }
+        };
+    }
+
+    public static void RestoreWindowPosition(Window? window)
+    {
+        if (!Se.Settings.General.RememberPositionAndSize || window == null)
+        {
+            return;
+        }
+
+        TrackLastNormalWindowState(window);
+
+        var existing = Se.Settings.General.WindowPositions.FirstOrDefault(wp => wp.WindowName == window.Name);
+        if (existing == null)
+        {
+            return;
+        }
+
+        // Reconstruct the last known rect
+        var desired = new PixelPoint(existing.X, existing.Y);
+        var windowRect = new PixelRect(desired, new PixelSize(existing.Width, existing.Height));
+
+        var screens = window.Screens.All;
+        bool fits = screens.Any(s => s.Bounds.Intersects(windowRect));
+
+        if (!fits)
+        {
+            // fallback: check if the old screen bounds still exist
+            var targetScreen = screens.FirstOrDefault(s =>
+                s.Bounds.X == existing.ScreenX &&
+                s.Bounds.Y == existing.ScreenY &&
+                s.Bounds.Width == existing.ScreenWidth &&
+                s.Bounds.Height == existing.ScreenHeight);
+
+            if (targetScreen != null)
+            {
+                // center on that screen
+                var px = targetScreen.Bounds.X + (targetScreen.Bounds.Width - existing.Width) / 2;
+                var py = targetScreen.Bounds.Y + (targetScreen.Bounds.Height - existing.Height) / 2;
+                desired = new PixelPoint(px, py);
+            }
+            else
+            {
+                // ultimate fallback: center on primary screen
+                var primary = window.Screens.Primary;
+                if (primary != null)
+                {
+                    var px = primary.Bounds.X + (primary.Bounds.Width - existing.Width) / 2;
+                    var py = primary.Bounds.Y + (primary.Bounds.Height - existing.Height) / 2;
+                    desired = new PixelPoint(px, py);
+                }
+            }
+        }
+
+        window.Position = desired;
+
+        if (existing.IsFullScreen)
+        {
+            window.WindowState = WindowState.FullScreen;
+        }
+        else if (existing.IsMaximized)
+        {
+            window.WindowState = WindowState.Maximized;
+        }
+        else
+        {
+            // A non-resizable window gets its size from its content (SizeToContent), so a saved
+            // size can only be stale - applying one from an older layout clips the window.
+            if (existing.Width > 0 && existing.Height > 0 && window.CanResize)
+            {
+                window.Width = existing.Width;
+                window.Height = existing.Height;
+            }
+
+            window.WindowState = WindowState.Normal;
+        }
+    }
+
+    public static void ShowHelp(string helpName, string section = "")
+    {
+        var helpUrl = $"http://subtitleedit.github.io/subtitleedit/{helpName}.html";
+        if (!string.IsNullOrEmpty(section))
+        {
+            helpUrl += $"#{section}";
+        }
+
+        OpenUrl(helpUrl);
+    }
+
+    public static void ShowHelp()
+    {
+        OpenUrl("http://subtitleedit.github.io/subtitleedit");
+    }
+
+    public static void OpenUrl(string url)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = url,
+                UseShellExecute = true
+            });
+        }
+        catch
+        {
+            // UseShellExecute might not work on some platforms, try platform-specific commands
+            if (OperatingSystem.IsLinux())
+            {
+                Process.Start("xdg-open", url);
+            }
+            else if (OperatingSystem.IsMacOS())
+            {
+                Process.Start("open", url);
+            }
+            else
+            {
+                throw;
+            }
+        }
+    }
+
+    internal static bool IsHelp(KeyEventArgs e)
+    {
+        var shortcut = Se.Settings.Shortcuts.FirstOrDefault(s =>
+            s.ActionName == nameof(Features.Main.MainViewModel.ShowHelpCommand) && s.Keys.Count > 0);
+        if (shortcut == null)
+        {
+            return e.Key == Key.F1;
+        }
+
+        var requiredModifiers = KeyModifiers.None;
+        string? keyName = null;
+        foreach (var token in shortcut.Keys)
+        {
+            switch (ShortcutManager.NormalizeKeyToken(token))
+            {
+                case "Control":
+                    requiredModifiers |= KeyModifiers.Control;
+                    break;
+                case "Alt":
+                    requiredModifiers |= KeyModifiers.Alt;
+                    break;
+                case "Shift":
+                    requiredModifiers |= KeyModifiers.Shift;
+                    break;
+                case "Win":
+                    requiredModifiers |= KeyModifiers.Meta;
+                    break;
+                default:
+                    keyName = token;
+                    break;
+            }
+        }
+
+        // A modifier-only binding can never match a key press.
+        if (keyName == null)
+        {
+            return false;
+        }
+
+        return e.KeyModifiers == requiredModifiers &&
+               string.Equals(ShortcutManager.GetShortcutKey(e).ToString(), keyName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static readonly ConditionalWeakTable<Window, Func<bool>> WindowSystemMenuOverrides = new();
+
+    /// <summary>
+    /// Lets a window claim Alt+Space for itself: while <paramref name="isOverridden"/> returns
+    /// true, <see cref="TryHandleWindowSystemMenu"/> leaves the key event alone instead of
+    /// opening the Windows system menu. The main window uses this so a user-assigned Alt+Space
+    /// shortcut wins over the Windows convention (#14536), mirroring the F10 rule; the shortcut
+    /// key-capture window uses it so the chord can be recorded at all.
+    /// </summary>
+    internal static void SetWindowSystemMenuOverride(Window window, Func<bool> isOverridden)
+    {
+        WindowSystemMenuOverrides.AddOrUpdate(window, isOverridden);
+    }
+
+    internal static bool IsWindowSystemMenuOverridden(Window window)
+    {
+        return WindowSystemMenuOverrides.TryGetValue(window, out var isOverridden) && isOverridden();
+    }
+
+    internal static bool TryHandleWindowSystemMenu(KeyEventArgs e, Window? window)
+    {
+        if (!OperatingSystem.IsWindows() || window == null)
+        {
+            return false;
+        }
+
+        if (e.Key == Key.Space && e.KeyModifiers == KeyModifiers.Alt)
+        {
+            if (IsWindowSystemMenuOverridden(window))
+            {
+                return false;
+            }
+
+
+            SystemMenu.Show(window);
+            e.Handled = true;
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Completes Avalonia's bare-Alt menu cycle when the window loses activation while Alt is held.
+    /// AccessKeyHandler tracks the Alt press privately and only settles on the Alt <em>release</em>;
+    /// when a modal window steals focus mid-gesture (e.g. Alt, O, ... opening the Shortcuts window),
+    /// the release never reaches this window and the handler is stranded with "Alt is down / ignore
+    /// the next Alt up" state - the next bare Alt press then fails to open the menu bar (#13083).
+    /// Raising a synthetic Alt KeyUp lets the handler finish its cycle. When Alt was down with no
+    /// other key pressed, that release legitimately opens the menu - callers run their
+    /// menu-deactivation cleanup afterwards to close it again.
+    /// </summary>
+    internal static void RaiseSyntheticAltKeyUp(Window? window)
+    {
+        window?.RaiseEvent(new KeyEventArgs
+        {
+            RoutedEvent = InputElement.KeyUpEvent,
+            Source = window,
+            Key = Key.LeftAlt,
+            PhysicalKey = PhysicalKey.AltLeft,
+            KeyModifiers = KeyModifiers.None,
+        });
+    }
+
+    private static bool _windowsSystemMenuClassHandlerRegistered;
+
+    /// <summary>
+    /// Registers a single class-level handler so every <see cref="Window"/> in the app
+    /// responds to Alt+Space by opening the standard Windows system menu. Call once at
+    /// application startup. No-op on non-Windows platforms or if already registered.
+    /// </summary>
+    internal static void RegisterWindowsSystemMenuClassHandler()
+    {
+        if (!OperatingSystem.IsWindows() || _windowsSystemMenuClassHandlerRegistered)
+        {
+            return;
+        }
+
+        _windowsSystemMenuClassHandlerRegistered = true;
+
+        InputElement.KeyDownEvent.AddClassHandler<Window>(
+            (window, e) => TryHandleWindowSystemMenu(e, window),
+            RoutingStrategies.Tunnel | RoutingStrategies.Bubble);
+    }
+
+    /// <summary>
+    /// On macOS, Ctrl+Click does not trigger <c>ContextFlyout</c> reliably. Attach this
+    /// handler on the control that owns the flyout — tunnel phase + handledEventsToo so
+    /// descendants cannot swallow the event first — and force the flyout open via
+    /// <c>MenuFlyout.ShowAt</c>. Use for control-scoped flyouts (DataGrid, ListBox,
+    /// TextBox, Image, Border, etc. — anything with a hit-test surface).
+    /// </summary>
+    public static void AttachMacContextFlyoutHandler(Control flyoutOwner)
+    {
+        if (!OperatingSystem.IsMacOS() || flyoutOwner == null)
+        {
+            return;
+        }
+
+        flyoutOwner.AddHandler(InputElement.PointerReleasedEvent, (_, e) =>
+        {
+            if (e.KeyModifiers.HasFlag(KeyModifiers.Control) &&
+                !e.KeyModifiers.HasFlag(KeyModifiers.Shift) &&
+                (e.InitialPressMouseButton == MouseButton.Left || e.InitialPressMouseButton == MouseButton.Right) &&
+                flyoutOwner.ContextFlyout is MenuFlyout menuFlyout)
+            {
+                menuFlyout.ShowAt(flyoutOwner, showAtPointer: true);
+                e.Handled = true;
+            }
+        }, RoutingStrategies.Tunnel, handledEventsToo: true);
+    }
+
+    /// <summary>
+    /// Window-scoped variant for when the flyout owner is a layout container (Grid/Panel)
+    /// with no Background — the container itself may not receive pointer events on empty
+    /// areas, so attach on the window root instead. Ctrl+Click anywhere in the window
+    /// opens the flyout at <paramref name="flyoutOwner"/>.
+    /// </summary>
+    public static void AttachMacContextFlyoutHandler(Window window, Control flyoutOwner)
+    {
+        if (!OperatingSystem.IsMacOS() || window == null || flyoutOwner == null)
+        {
+            return;
+        }
+
+        window.AddHandler(InputElement.PointerReleasedEvent, (_, e) =>
+        {
+            if (e.KeyModifiers.HasFlag(KeyModifiers.Control) &&
+                !e.KeyModifiers.HasFlag(KeyModifiers.Shift) &&
+                (e.InitialPressMouseButton == MouseButton.Left || e.InitialPressMouseButton == MouseButton.Right) &&
+                flyoutOwner.ContextFlyout is MenuFlyout menuFlyout)
+            {
+                menuFlyout.ShowAt(flyoutOwner, showAtPointer: true);
+                e.Handled = true;
+            }
+        }, RoutingStrategies.Tunnel, handledEventsToo: true);
+    }
+
+    /// <summary>
+    /// Makes Home/End jump to the first/last row of <paramref name="dataGrid"/> and select it.
+    /// Avalonia's DataGrid only moves the cell cursor, which is why this is needed. Tunnel
+    /// phase so the grid's own navigation does not consume the key first.
+}

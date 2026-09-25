@@ -1,0 +1,326 @@
+﻿using System;
+
+namespace Nikse.SubtitleEdit.Logic.Config.Language.Tools;
+
+public class LanguageVideo
+{
+    public LanguageBurnIn BurnIn { get; set; } = new();
+    public LanguageTransparentVideo VideoTransparent { get; set; } = new();
+    public LanguageAudioToText AudioToText { get; set; } = new();
+    public LanguageTextToSpeech TextToSpeech { get; set; } = new();
+    public LanguageShotChanges ShotChanges { get; set; } = new();
+    public LanguageChapters Chapters { get; set; } = new();
+    public LanguageVideoOcr VideoOcr { get; set; } = new();
+    public LanguageBackgroundMusic BackgroundMusic { get; set; } = new();
+    public string GoToVideoPosition { get; set; }
+    public string GoToVideoPositionDotDotDot { get; set; }
+    public string GenerateBlankVideoDotDotDot { get; set; }
+    public string GenerateBlankVideoTitle { get; set; }
+    public string ReEncodeVideoForBetterSubtitlingTitle { get; set; }
+    public string ReEncodeVideoForBetterSubtitlingDotDotDot { get; set; }
+    public string OpenSecondarySubtitleOnVideoPlayerDotDotDot { get; set; }
+    public string OpenSecondarySubtitleOnVideoPlayer { get; set; }
+    public string RemoveSecondarySubtitleOnVideoPlayer { get; set; }
+    public string EditSecondarySubtitleSettings { get; set; }
+    public string EditSecondarySubtitleSettingsDotDotDot { get; set; }
+    public string SecondarySubtitleRememberSettings { get; set; }
+    public string SecondarySubtitleDoNotShowAgain { get; set; }
+    public string SecondarySubtitleJustifyLines { get; set; }
+    public string OpenRecentVideo { get; set; }
+    public string ClearRecentVideos { get; set; }
+    public string CutVideoTitle { get; set; }
+    public string CutVideoDotDotDot { get; set; }
+    public string RemuxVideoTitle { get; set; }
+    public string RemuxVideoDotDotDot { get; set; }
+    public string RemuxVideoInputVideo { get; set; }
+    public string RemuxVideoMultipleTracksRequiresMkv { get; set; }
+    public string RemuxVideoOutputFormat { get; set; }
+    public string RemuxVideoOutputFile { get; set; }
+    public string RemuxVideoRemuxing { get; set; }
+    public string RemuxVideoFinalizing { get; set; }
+    public string RemuxVideoCompleted { get; set; }
+    public string RemuxVideoFailed { get; set; }
+    public string RemuxVideoPleaseSelectBoth { get; set; }
+    public string RemuxVideoAssRequiresMkv { get; set; }
+    public string RemuxVideoSelectAudioTrack { get; set; }
+    public string RemuxVideoSelectAudioTrackFor { get; set; }
+    public string RemuxVideoSelectAudioTrackPrompt { get; set; }
+    public string RemuxVideoVideoFile { get; set; }
+    public string RemuxVideoAudioFile { get; set; }
+    public string RemuxVideoAudioFiles { get; set; }
+    public string RemuxVideoSubtitleFiles { get; set; }
+    public string RemuxVideoSelectAudioTrackDotDotDot { get; set; }
+    public string RemuxVideoFilesX { get; set; }
+    public string RemuxVideoMixAudio { get; set; }
+    public string RemuxVideoVolumePercent { get; set; }
+    public string RemuxVideoVolumeX { get; set; }
+    public string RemuxVideoFastStart { get; set; }
+    public string EmbedSubtitlesDotDotDot { get; set; }
+    public string GenerateTimeCodes { get; set; }
+    public string CheckeredImage { get; set; }
+    public string PromptForFfmpegParamsAndGenerate { get; set; }
+    public string CutVideoCutSegments { get; set; }
+    public string CutVideoMergeSegments { get; set; }
+    public string CutVideoSplitSegments { get; set; }
+    public string CutVideoAlsoCutSubtitle { get; set; }
+    public string CutVideoSubtitleFileGeneratedX { get; set; }
+    public string CutVideoTransition { get; set; }
+    public string CutVideoTransitionDurationSeconds { get; set; }
+    public string CutVideoFadeInSeconds { get; set; }
+    public string CutVideoFadeOutSeconds { get; set; }
+    public string CutVideoPreviewTransition { get; set; }
+    public string CutVideoPreviewTransitionTitle { get; set; }
+    public string CutVideoPreviewNeedsJoin { get; set; }
+    public string CutVideoTransitionInfoX { get; set; }
+    public string CutVideoTransitionFade { get; set; }
+    public string CutVideoTransitionFadeBlack { get; set; }
+    public string CutVideoTransitionFadeWhite { get; set; }
+    public string CutVideoTransitionFadeGrays { get; set; }
+    public string CutVideoTransitionDissolve { get; set; }
+    public string CutVideoTransitionWipeLeft { get; set; }
+    public string CutVideoTransitionWipeRight { get; set; }
+    public string CutVideoTransitionWipeUp { get; set; }
+    public string CutVideoTransitionWipeDown { get; set; }
+    public string CutVideoTransitionSlideLeft { get; set; }
+    public string CutVideoTransitionSlideRight { get; set; }
+    public string CutVideoTransitionSlideUp { get; set; }
+    public string CutVideoTransitionSlideDown { get; set; }
+    public string CutVideoTransitionSmoothLeft { get; set; }
+    public string CutVideoTransitionSmoothRight { get; set; }
+    public string CutVideoTransitionCircleOpen { get; set; }
+    public string CutVideoTransitionCircleClose { get; set; }
+    public string CutVideoTransitionRadial { get; set; }
+    public string CutVideoTransitionPixelize { get; set; }
+    public string CutVideoTransitionBlur { get; set; }
+    public string ImportCurrentSubtitle { get; set; }
+    public string AddRemoveEmbeddedSubtitlesTitle { get; set; }
+    public string AddRemoveEmbeddedSubtitlesMp4Title { get; set; }
+    public string AddCurrentSubtitle { get; set; }
+    public string EmbeddedTrackNoSubtitlesFoundTitle { get; set; }
+    public string EmbeddedTrackNoSubtitlesFoundMessage { get; set; }
+    public string EmbeddedTrackNoTracksTitle { get; set; }
+    public string EmbeddedTrackNoTracksMessage { get; set; }
+    public string EmbeddedTrackUnableToGenerateTitle { get; set; }
+    public string EmbeddedTrackUnableToGenerateMessage { get; set; }
+    public string EmbeddedTrackPreviewUnavailableTitle { get; set; }
+    public string EmbeddedTrackPreviewUnavailableMessage { get; set; }
+    public string EmbeddedTrackGeneratingVideoXY { get; set; }
+    public string EmbeddedTrackGeneratingVideo { get; set; }
+    public string Mp4FilesFilter { get; set; }
+    public string EmbeddedTracksPickVideoHint { get; set; }
+    public string ViewMatroskaTrackX { get; set; }
+    public string ResolutionSeparator { get; set; }
+    public string OpenFromUrlTitle { get; set; }
+    public string OpenFromUrlOpenOnline { get; set; }
+    public string OpenFromUrlOpenOnlineDescription { get; set; }
+    public string OpenFromUrlOpenOnlineNote { get; set; }
+    public string OpenFromUrlDownloadAndOpen { get; set; }
+    public string OpenFromUrlDownloadAndOpenDescription { get; set; }
+    public string OpenFromUrlDownloadAndOpenNote { get; set; }
+    public string OpenFromUrlDownloadingTitle { get; set; }
+    public string OpenFromUrlDownloadSubtitles { get; set; }
+    public string OpenFromUrlDownloadVideo { get; set; }
+    public string OpenFromUrlIncludeAutoGeneratedSubtitles { get; set; }
+    public string AssaStyleWillBeUsed { get; set; }
+    public string PickOnlineSubtitleTitle { get; set; }
+    public string OutputSettingsTitle { get; set; }
+    public string TtsCrispAsrSettingsTitle { get; set; }
+    public string TtsDownloadEngineTitle { get; set; }
+    public string IndexTts25LicenseTitle { get; set; }
+    public string IndexTts25LicenseHeader { get; set; }
+    public string IndexTts25LicenseIntro { get; set; }
+    public string IndexTts25LicenseReadFullText { get; set; }
+    public string IndexTts25LicenseModelPage { get; set; }
+    public string IndexTts25LicenseAcceptCheckBox { get; set; }
+    public string IndexTts25LicenseAcceptAndDownload { get; set; }
+    public string IndexTts25LicenseDeclined { get; set; }
+    public string IndexTts25SettingsTitle { get; set; }
+    public string IndexTts25Emotion { get; set; }
+    public string IndexTts25EmotionStrength { get; set; }
+    public string PickOnlineSubtitleFetching { get; set; }
+    public string PickOnlineSubtitleNoneFound { get; set; }
+    public string ForcedAligner { get; set; }
+    public string PostProcessing { get; set; }
+    public string ToggleCurrentSubtitleWhilePlaying { get; set; }
+    public string ToggleSubtitlesOnVideoPlayer { get; set; }
+    public string SubtitlesOnVideoPlayerOn { get; set; }
+    public string SubtitlesOnVideoPlayerOff { get; set; }
+    public string OnlyMkvCanSupportEmbeddedSubtitleEditing { get; set; }
+    public string ReEncodeInfo { get; set; }
+    public string ReEncodeGeneratingVideoX { get; set; }
+    public string ReEncodeGeneratingVideoXofY { get; set; }
+    public string ReEncodeUnableToGenerateVideo { get; set; }
+    public string ReEncodeOutputVideoFileNotGenerated { get; set; }
+    public string ReEncodeGeneratingDone { get; set; }
+    public string ReEncodeGeneratedFilesX { get; set; }
+    public string ReEncodeFfmpegParameters { get; set; }
+    public string Voices { get; set; }
+    public string Presets { get; set; }
+    public string TalkerX { get; set; }
+    public string BaseModel { get; set; }
+    public string TurboModel { get; set; }
+    public string TtsEngineNotInstalled { get; set; }
+    public string TtsEngineUpdateAvailable { get; set; }
+    public string TtsEngineTooOldUpdateRequired { get; set; }
+    public string TtsEngineChatterboxCapable { get; set; }
+
+    public LanguageVideo()
+    {
+        GoToVideoPosition = "Go to video position";
+        GoToVideoPositionDotDotDot = "Go to video position...";
+        GenerateBlankVideoTitle = "Generate blank video";
+        GenerateBlankVideoDotDotDot = "Generate blank video...";
+        ReEncodeVideoForBetterSubtitlingTitle = "Re-encode video for better subtitling";
+        ReEncodeVideoForBetterSubtitlingDotDotDot = "Re-encode video for better subtitling...";
+        OpenSecondarySubtitleOnVideoPlayer = "Second subtitle file (on video player)";
+        OpenSecondarySubtitleOnVideoPlayerDotDotDot = "Open second subtitle file...";
+        RemoveSecondarySubtitleOnVideoPlayer = "Remove second subtitle file";
+        EditSecondarySubtitleSettings = "Edit second subtitle settings";
+        EditSecondarySubtitleSettingsDotDotDot = "Edit second subtitle settings...";
+        SecondarySubtitleRememberSettings = "Remember these settings";
+        SecondarySubtitleDoNotShowAgain = "Do not show this dialog again";
+        SecondarySubtitleJustifyLines = "Justify lines";
+        OpenRecentVideo = "Open recent video";
+        ClearRecentVideos = "Clear recent videos";
+        CutVideoTitle = "Cut video";
+        CutVideoDotDotDot = "Cut video...";
+        RemuxVideoTitle = "Remux video";
+        RemuxVideoDotDotDot = "Remux video...";
+        RemuxVideoInputVideo = "Input video:";
+        RemuxVideoMultipleTracksRequiresMkv = "Multiple audio or subtitle tracks require the MKV container. Output format has been automatically switched to .mkv.";
+        RemuxVideoOutputFormat = "Output format:";
+        RemuxVideoOutputFile = "Output file:";
+        RemuxVideoRemuxing = "Remuxing video and audio...";
+        RemuxVideoFinalizing = "Finalizing output file (moving index to the start)...";
+        RemuxVideoCompleted = "Video remuxed successfully.";
+        RemuxVideoFailed = "Failed to remux video.";
+        RemuxVideoPleaseSelectBoth = "Please select both video and audio files.";
+        RemuxVideoAssRequiresMkv = "ASS/SSA subtitles require the MKV container to preserve all formatting and styles.";
+        RemuxVideoSelectAudioTrack = "Select audio track";
+        RemuxVideoSelectAudioTrackFor = "Select audio track for {0}";
+        RemuxVideoSelectAudioTrackPrompt = "The file '{0}' contains {1} audio tracks. Please select the audio track to remux:";
+        RemuxVideoVideoFile = "video";
+        RemuxVideoAudioFile = "audio";
+        RemuxVideoAudioFiles = "Audio files:";
+        RemuxVideoSubtitleFiles = "Subtitle files (optional, soft subtitles):";
+        RemuxVideoSelectAudioTrackDotDotDot = "Select audio track...";
+        RemuxVideoFilesX = "{0} files";
+        RemuxVideoMixAudio = "Mix audio into one track";
+        RemuxVideoVolumePercent = "Volume %:";
+        RemuxVideoVolumeX = "Volume {0}%";
+        RemuxVideoFastStart = "Optimize for web streaming (move index to front - slower)";
+        EmbedSubtitlesDotDotDot = "Add/remove embedded subtitles...";
+        GenerateTimeCodes = "Generate time codes";
+        CheckeredImage = "Checkered image";
+        PromptForFfmpegParamsAndGenerate = "Prompt for ffmpeg parameters and generate";
+        CutVideoCutSegments = "Cut segments";
+        CutVideoMergeSegments = "Merge segments";
+        CutVideoSplitSegments = "Save segments individually";
+        CutVideoAlsoCutSubtitle = "Also cut subtitle";
+        CutVideoSubtitleFileGeneratedX = "Subtitle file generated: {0}";
+        CutVideoTransition = "Transition between segments";
+        CutVideoTransitionDurationSeconds = "Duration (seconds)";
+        CutVideoFadeInSeconds = "Fade from black at start (seconds)";
+        CutVideoFadeOutSeconds = "Fade to black at end (seconds)";
+        CutVideoPreviewTransition = "Preview transition";
+        CutVideoPreviewTransitionTitle = "Transition preview";
+        CutVideoPreviewNeedsJoin = "There is no join to preview - add at least two segments to merge, or a segment to cut out of the middle.";
+        CutVideoTransitionInfoX = "Each transition overlaps the parts it joins, so the output gets {0} seconds shorter per join. A cut subtitle is re-timed to match.";
+        CutVideoTransitionFade = "Fade";
+        CutVideoTransitionFadeBlack = "Fade through black";
+        CutVideoTransitionFadeWhite = "Fade through white";
+        CutVideoTransitionFadeGrays = "Fade through gray";
+        CutVideoTransitionDissolve = "Dissolve";
+        CutVideoTransitionWipeLeft = "Wipe left";
+        CutVideoTransitionWipeRight = "Wipe right";
+        CutVideoTransitionWipeUp = "Wipe up";
+        CutVideoTransitionWipeDown = "Wipe down";
+        CutVideoTransitionSlideLeft = "Slide left";
+        CutVideoTransitionSlideRight = "Slide right";
+        CutVideoTransitionSlideUp = "Slide up";
+        CutVideoTransitionSlideDown = "Slide down";
+        CutVideoTransitionSmoothLeft = "Smooth left";
+        CutVideoTransitionSmoothRight = "Smooth right";
+        CutVideoTransitionCircleOpen = "Circle open";
+        CutVideoTransitionCircleClose = "Circle close";
+        CutVideoTransitionRadial = "Radial";
+        CutVideoTransitionPixelize = "Pixelize";
+        CutVideoTransitionBlur = "Blur";
+        ImportCurrentSubtitle = "Import current subtitle";
+        AddRemoveEmbeddedSubtitlesTitle = "Add/remove embedded subtitles";
+        AddRemoveEmbeddedSubtitlesMp4Title = "Add/remove embedded subtitles (MP4)";
+        AddCurrentSubtitle = "Add current subtitle";
+        EmbeddedTrackNoSubtitlesFoundTitle = "No subtitles found";
+        EmbeddedTrackNoSubtitlesFoundMessage = "The selected subtitle file does not contain any subtitles.";
+        EmbeddedTrackNoTracksTitle = "No tracks added";
+        EmbeddedTrackNoTracksMessage = "Add one or more subtitle tracks, or load a video that already has embedded subtitles.";
+        EmbeddedTrackUnableToGenerateTitle = "Unable to generate video";
+        EmbeddedTrackUnableToGenerateMessage = "Output video file not generated: {0}{1}Parameters: {2}";
+        EmbeddedTrackPreviewUnavailableTitle = "Preview not available";
+        EmbeddedTrackPreviewUnavailableMessage = "Could not extract the selected subtitle stream. The codec may not be a text format that ffmpeg can convert to SRT (e.g. bitmap-based subtitles).";
+        EmbeddedTrackGeneratingVideoXY = "Generating video... {0}%     {1}";
+        EmbeddedTrackGeneratingVideo = "Generating video...";
+        Mp4FilesFilter = "MP4 files";
+        EmbeddedTracksPickVideoHint = "Choose a video file, or drop one here, to see its subtitle tracks.";
+        ViewMatroskaTrackX = "View Matroska track - {0}";
+        ResolutionSeparator = "x";
+        OpenFromUrlTitle = "Open video file from URL";
+        OpenFromUrlOpenOnline = "Open online";
+        OpenFromUrlOpenOnlineDescription = "Stream the video directly. Fastest start.";
+        OpenFromUrlOpenOnlineNote = "Speech-to-text and waveform spikes are not available in this mode.";
+        OpenFromUrlDownloadAndOpen = "Download and open";
+        OpenFromUrlDownloadAndOpenDescription = "Save the video locally, then open it.";
+        OpenFromUrlDownloadAndOpenNote = "Required for speech-to-text and waveform spikes.";
+        OpenFromUrlDownloadingTitle = "Downloading video";
+        OpenFromUrlDownloadSubtitles = "Download subtitles";
+        OpenFromUrlDownloadVideo = "Download video";
+        OpenFromUrlIncludeAutoGeneratedSubtitles = "Include auto-generated subtitles (original language)";
+        PickOnlineSubtitleTitle = "Pick subtitle to download";
+        PickOnlineSubtitleFetching = "Downloading subtitles...";
+        PickOnlineSubtitleNoneFound = "No subtitles found for this URL.";
+        ForcedAligner = "Forced aligner";
+        PostProcessing = "Post-processing...";
+        ToggleCurrentSubtitleWhilePlaying = "Toggle current subtitle while playing";
+        ToggleSubtitlesOnVideoPlayer = "Toggle subtitles on video player";
+        SubtitlesOnVideoPlayerOn = "Subtitles on video player: on";
+        SubtitlesOnVideoPlayerOff = "Subtitles on video player: off";
+        OnlyMkvCanSupportEmbeddedSubtitleEditing = "Only Matroska (.mkv, .webm) files are supported for editing embedded subtitles.";
+        ReEncodeInfo = "Re-encoding can make subtitling smoother:" + Environment.NewLine +
+                       "• Smaller resolution (high resolutions make subtitling slow)" + Environment.NewLine +
+                       "• Re-encode the video to H.264 + yuv420p makes it more compatible" + Environment.NewLine +
+                       "• Optimized for fast seeking";
+        ReEncodeGeneratingVideoX = "Generating video... {0}%     {1}";
+        ReEncodeGeneratingVideoXofY = "Generating video {0}/{1}... {2}%     {3}";
+        ReEncodeUnableToGenerateVideo = "Unable to generate video";
+        ReEncodeOutputVideoFileNotGenerated = "Output video file not generated: {0}" + Environment.NewLine + "Parameters: {1}";
+        ReEncodeGeneratingDone = "Generating done";
+        ReEncodeGeneratedFilesX = "Generated files ({0}):";
+        ReEncodeFfmpegParameters = "ffmpeg parameters";
+        AssaStyleWillBeUsed = "Current ASSA style will be used" + Environment.NewLine + Environment.NewLine +
+                              "Change subtitle format if" + Environment.NewLine +
+                              "you want to set styles here";
+        Voices = "Voices";
+        Presets = "Presets";
+        TalkerX = "Talker {0}";
+        BaseModel = "Base model";
+        TurboModel = "Turbo model";
+        TtsEngineNotInstalled = "{0} not installed";
+        TtsEngineUpdateAvailable = "{0} - update available";
+        TtsEngineTooOldUpdateRequired = "{0} too old - update required";
+        TtsEngineChatterboxCapable = "{0} (Chatterbox-capable)";
+        OutputSettingsTitle = "Output settings";
+        TtsCrispAsrSettingsTitle = "{0} (CrispASR) settings";
+        TtsDownloadEngineTitle = "TTS - Download engine";
+        IndexTts25LicenseTitle = "IndexTTS 2.5 - model license";
+        IndexTts25LicenseHeader = "The IndexTTS 2.5 model has its own license";
+        IndexTts25LicenseIntro = "The audio.cpp engine is Apache-2.0, but the IndexTTS 2.5 model weights are licensed by bilibili under terms that are not open source. Please read the main points before downloading.";
+        IndexTts25LicenseReadFullText = "Read the full license";
+        IndexTts25LicenseModelPage = "Model page";
+        IndexTts25LicenseAcceptCheckBox = "I have read and accept the bilibili Model Use License Agreement";
+        IndexTts25LicenseAcceptAndDownload = "Accept and download";
+        IndexTts25LicenseDeclined = "IndexTTS 2.5 cannot be used until the model license is accepted.";
+        IndexTts25SettingsTitle = "IndexTTS 2.5 (audio.cpp) settings";
+        IndexTts25Emotion = "Emotion";
+        IndexTts25EmotionStrength = "Emotion strength";
+    }
+}

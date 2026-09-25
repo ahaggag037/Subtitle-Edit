@@ -1,0 +1,224 @@
+﻿using Avalonia.Skia;
+using Nikse.SubtitleEdit.Core.Common;
+using Nikse.SubtitleEdit.Core.SubtitleFormats;
+using Nikse.SubtitleEdit.Logic.Config;
+using Nikse.SubtitleEdit.Logic.VideoPlayers.LibMpvDynamic;
+using System;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Nikse.SubtitleEdit.Logic.Media;
+
+public class VlcReloader : IVlcReloader
+{
+    public bool SmpteMode { get; set; }
+    public int VideoWidth { get; set; } = 1280;
+    public int VideoHeight { get; set; } = 720;
+
+    private readonly AdvancedSubStationAlpha _assFormat = new();
+    private Subtitle? _subtitlePrev;
+    private string _mpvTextOld = string.Empty;
+    private int _mpvSubOldHash = -1;
+    private string? _mpvTextFileName;
+    private string? _mpvTextFileExtension;
+    private int _retryCount = 3;
+    private string? _mpvPreviewStyleHeader;
+
+    public async Task RefreshVlc(LibVlcDynamicPlayer vlc, Subtitle subtitle, Subtitle? subtitleSecondary, SubtitleFormat uiFormat, bool subtitleIsOwned = false)
+    {
+        if (subtitle.Paragraphs.Count == 0 && subtitleSecondary == null)
+        {
+            return;
+        }
+
+        try
+        {
+            var uiFormatType = uiFormat.GetType();
+            if (!subtitleIsOwned)
+            {
+                subtitle = new Subtitle(subtitle, false);
+            }
+
+            if (SmpteMode)
+            {
+                SmptePreviewStretch.Apply(subtitle);
+            }
+
+            SubtitleFormat format = _assFormat;
+            string text;
+            if (uiFormatType == typeof(NetflixImsc11Japanese) || NetflixImsc11JapaneseToAss.HasJapaneseMarkup(subtitle))
+            {
+                // See MpvReloader - the furigana/bouten/vertical markup has to become positioned
+                // render lines before libass sees it (issue #13861, issue #14165).
+                subtitle = NetflixImsc11JapaneseToAss.ConvertToSubtitle(subtitle, VideoWidth, VideoHeight);
+                SecondarySubtitleMerger.AddSecondarySubtitle(subtitle, subtitleSecondary, SmpteMode);
+                text = subtitle.ToText(_assFormat);
+            }
+            else if (uiFormatType == typeof(WebVTT) || uiFormatType == typeof(WebVTTFileWithLineNumber))
+            {
+                var defaultStyle = GetMpvPreviewStyle(Se.Settings.Video);
+                subtitle = new Subtitle(subtitle);
+                subtitle = WebVttToAssa.Convert(subtitle, defaultStyle, VideoWidth, VideoHeight);
+                SecondarySubtitleMerger.AddSecondarySubtitle(subtitle, subtitleSecondary, SmpteMode);
+                text = subtitle.ToText(_assFormat);
+            }
+            else
+            {
+                if (subtitle.Header == null || !subtitle.Header.Contains("[V4+ Styles]") || uiFormatType != typeof(AdvancedSubStationAlpha))
+                {
+                    if (string.IsNullOrEmpty(subtitle.Header) && uiFormatType == typeof(SubStationAlpha))
+                    {
+                        subtitle.Header = SubStationAlpha.DefaultHeader;
+                    }
+
+                    if (subtitle.Header != null && subtitle.Header.Contains("[V4 Styles]", StringComparison.Ordinal))
+                    {
+                        subtitle.Header = AdvancedSubStationAlpha.GetHeaderAndStylesFromSubStationAlpha(subtitle.Header);
+                    }
+
+                    var oldSub = subtitle;
+                    subtitle = new Subtitle(subtitle);
+                    if (Se.Settings.Appearance.RightToLeft)
+                    {
+                        for (var index = 0; index < subtitle.Paragraphs.Count; index++)
+                        {
+                            var paragraph = subtitle.Paragraphs[index];
+                            if (LanguageAutoDetect.ContainsRightToLeftLetter(paragraph.Text))
+                            {
+                                paragraph.Text = Utilities.FixRtlViaUnicodeChars(paragraph.Text);
+                            }
+                        }
+                    }
+
+                    if (subtitle.Header == null || !(subtitle.Header.Contains("[V4+ Styles]") && uiFormatType == typeof(SubStationAlpha)))
+                    {
+                        subtitle.Header = MpvPreviewStyleHeader;
+                    }
+
+                    // See MpvReloader - the GSI block survives a format change in the toolbar, so
+                    // an STL header alone does not mean the subtitle is still EBU STL.
+                    if (EbuStlPreviewStyler.IsTeletextPreview(oldSub.Header, uiFormatType))
+                    {
+                        EbuStlPreviewStyler.Apply(subtitle, oldSub.Header, GetMpvPreviewStyle(Se.Settings.Video), MpvPreviewTitle);
+                    }
+
+                    // See MpvReloader - the position the source format carries beats the one fixed
+                    // preview alignment (discussion #13857), but only while the format still carries
+                    // it. With the positioning off the call strips what the old format left behind.
+                    var usePositions = Se.Settings.Video.MpvPreviewUsePositionFromFile && uiFormat.HasPositionSupport;
+                    SubtitlePositionToAssa.ApplyPositions(subtitle, oldSub.Header, usePositions);
+                }
+
+                SecondarySubtitleMerger.AddSecondarySubtitle(subtitle, subtitleSecondary, SmpteMode);
+                var hash = subtitle.GetFastHashCode(null);
+                if (hash != _mpvSubOldHash || string.IsNullOrEmpty(_mpvTextOld))
+                {
+                    text = subtitle.ToText(_assFormat);
+                    _mpvSubOldHash = hash;
+                }
+                else
+                {
+                    text = _mpvTextOld;
+                }
+            }
+
+            if (text != _mpvTextOld || _mpvTextFileName == null || _retryCount > 0)
+            {
+                if (_retryCount >= 0 || string.IsNullOrEmpty(_mpvTextFileName) || _subtitlePrev == null || _subtitlePrev.FileName != subtitle.FileName || _mpvTextFileExtension != format.Extension)
+                {
+                    DeleteTempMpvFileName();
+                    _mpvTextFileName = FileUtil.GetTempFileName(format.Extension);
+                    _mpvTextFileExtension = format.Extension;
+                    await File.WriteAllTextAsync(_mpvTextFileName, text);
+                    await vlc.SubAdd(_mpvTextFileName);
+                    _retryCount--;
+                }
+                else
+                {
+                    DeleteTempMpvFileName();
+                    _mpvTextFileName = FileUtil.GetTempFileName(format.Extension);
+                    _mpvTextFileExtension = format.Extension;
+                    await File.WriteAllTextAsync(_mpvTextFileName, text);
+                    await vlc.SubAdd(_mpvTextFileName);
+                }
+                _mpvTextOld = text;
+            }
+            _subtitlePrev = subtitle;
+        }
+        catch (Exception exception)
+        {
+            Se.LogError(exception);
+        }
+    }
+
+    private string MpvPreviewStyleHeader
+    {
+        get
+        {
+            if (string.IsNullOrEmpty(_mpvPreviewStyleHeader))
+            {
+                UpdateMpvStyle();
+            }
+
+            return _mpvPreviewStyleHeader ?? string.Empty;
+        }
+        set => _mpvPreviewStyleHeader = value;
+    }
+
+    private const string MpvPreviewTitle = "MPV preview file";
+
+    public void UpdateMpvStyle()
+    {
+        var mpvStyle = GetMpvPreviewStyle(Se.Settings.Video);
+        MpvPreviewStyleHeader = string.Format(AdvancedSubStationAlpha.HeaderNoStyles, MpvPreviewTitle, mpvStyle.ToRawAss(SsaStyle.DefaultAssStyleFormat));
+    }
+
+    private static SsaStyle GetMpvPreviewStyle(SeVideo gs)
+    {
+        return new SsaStyle
+        {
+            Name = "Default",
+            FontName = gs.MpvPreviewFontName,
+            FontSize = gs.MpvPreviewFontSize,
+            Bold = gs.MpvPreviewFontBold,
+            Primary = gs.MpvPreviewColorPrimary.FromHexToColor().ToSKColor(),
+            Outline = gs.MpvPreviewColorOutline.FromHexToColor().ToSKColor(),
+            Background = gs.MpvPreviewColorShadow.FromHexToColor().ToSKColor(),
+            OutlineWidth = gs.MpvPreviewOutlineWidth,
+            ShadowWidth = gs.MpvPreviewShadowWidth,
+            BorderStyle = gs.MpvPreviewBorderType.ToString(),
+            Alignment = gs.MpvPreviewAlignment,
+            MarginVertical = gs.MpvPreviewMargin,
+            MarginLeft =  gs.MpvPreviewMargin,
+            MarginRight =  gs.MpvPreviewMargin,
+        };
+    }
+
+    private void DeleteTempMpvFileName()
+    {
+        try
+        {
+            if (File.Exists(_mpvTextFileName))
+            {
+                File.Delete(_mpvTextFileName);
+                _mpvTextFileName = null;
+            }
+        }
+        catch
+        {
+            // ignored
+        }
+    }
+
+    public void Reset()
+    {
+        DeleteTempMpvFileName();
+        _mpvTextFileName = null;
+        _mpvTextFileExtension = null;
+        _mpvTextOld = string.Empty;
+        _mpvPreviewStyleHeader = null;
+        _retryCount = 3;
+        _mpvSubOldHash = -1;
+    }
+}

@@ -1,0 +1,413 @@
+﻿using Nikse.SubtitleEdit.Core.Dictionaries;
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Text;
+using Nikse.SubtitleEdit.Core.SubtitleFormats;
+
+namespace Nikse.SubtitleEdit.Core.Common
+{
+    public class FixCasing
+    {
+        public bool FixNormal { get; set; }
+        public bool FixNormalOnlyAllUppercase { get; set; }
+        public bool FixMakeLowercase { get; set; }
+        public bool FixMakeProperCase { get; set; }
+        public bool FixMakeUppercase { get; set; }
+        public bool FixProperCaseOnlyAllUppercase { get; set; }
+        public SubtitleFormat Format { get; set; }
+
+        private readonly string _language;
+        private readonly List<string> _names;
+
+        public FixCasing(string language)
+        {
+            _language = language;
+            var nameList = new NameList(Configuration.DictionariesDirectory, language, false, string.Empty);
+            _names = nameList.GetAllNames();
+
+            // Longer names must be first
+            _names.Sort((s1, s2) => s2.Length.CompareTo(s1.Length));
+        }
+
+        public int NoOfLinesChanged { get; set; }
+
+        public void Fix(Subtitle subtitle)
+        {
+            var subCulture = GetCultureInfoFromLanguage(_language);
+            Paragraph last = null;
+            foreach (var p in subtitle.Paragraphs)
+            {
+                if (last != null)
+                {
+                    p.Text = Fix(p.Text, last.Text, _names, subCulture, p.StartTime.TotalMilliseconds - last.EndTime.TotalMilliseconds);
+                }
+                else
+                {
+                    p.Text = Fix(p.Text, string.Empty, _names, subCulture, 10000);
+                }
+
+                // fix casing of English alone i to I
+                if (FixNormal && _language.StartsWith("en", StringComparison.Ordinal))
+                {
+                    p.Text = FixEnglishAloneILowerToUpper(p.Text);
+                    p.Text = FixCasingAfterTitles(p.Text);
+                }
+
+                if (FixNormal)
+                {
+                    p.Text = FixStutter(p.Text);
+                }
+
+                last = p;
+            }
+        }
+
+        private static CultureInfo GetCultureInfoFromLanguage(string language)
+        {
+            try
+            {
+                return CultureInfo.GetCultureInfo(language);
+            }
+            catch
+            {
+                return CultureInfo.CurrentUICulture;
+            }
+        }
+
+        private static string FixEnglishAloneILowerToUpper(string input)
+        {
+            const string pre = " >¡¿♪♫([";
+            const string post = " <!?.:;,♪♫)]";
+
+            var text = input;
+            if (text.StartsWith("I-i ", StringComparison.Ordinal))
+            {
+                text = text.Remove(0, 3).Insert(0, "I-I");
+            }
+            text = text.Replace(" i-i ", " I-I ");
+            if (text.StartsWith("I-i-i ", StringComparison.Ordinal))
+            {
+                text = text.Remove(0, 5).Insert(0, "I-I-I");
+            }
+            text = text.Replace(" i-i-i ", " I-I-I ");
+
+            if (text.StartsWith("I-if ", StringComparison.Ordinal))
+            {
+                text = text.Remove(0, 4).Insert(0, "I-If");
+            }
+
+            for (var indexOfI = text.IndexOf('i'); indexOfI >= 0; indexOfI = text.IndexOf('i', indexOfI + 1))
+            {
+                if (indexOfI == 0 || pre.Contains(text[indexOfI - 1]))
+                {
+                    if (text.AsSpan(indexOfI).StartsWith("i-i ".AsSpan(), StringComparison.Ordinal))
+                    {
+                        text = text.Remove(indexOfI, 3).Insert(indexOfI, "I-I");
+                    }
+                    else if (text.AsSpan(indexOfI).StartsWith("i-if ".AsSpan(), StringComparison.Ordinal))
+                    {
+                        text = text.Remove(indexOfI, 4).Insert(indexOfI, "I-If");
+                    }
+                    else if (indexOfI + 1 == text.Length || post.Contains(text[indexOfI + 1]))
+                    {
+                        text = text.Remove(indexOfI, 1).Insert(indexOfI, "I");
+                    }
+                    else if (indexOfI > 1 && indexOfI < text.Length - 2 && "\r\n".Contains(text[indexOfI + 1]) && text[indexOfI - 1] == ' ')
+                    {
+                        text = text.Remove(indexOfI, 1).Insert(indexOfI, "I");
+                    }
+                }
+                if (indexOfI > 1 && indexOfI < text.Length - 2 && "\r\n".Contains(text[indexOfI - 1]) && " .?!".Contains(text[indexOfI + 1]))
+                {
+                    text = text.Remove(indexOfI, 1).Insert(indexOfI, "I");
+                }
+                else if (indexOfI > 1 && "\r\n ".Contains(text[indexOfI - 1]) && text.AsSpan(indexOfI).StartsWith("i-i ".AsSpan(), StringComparison.Ordinal))
+                {
+                    text = text.Remove(indexOfI, 3).Insert(indexOfI, "I-I");
+                }
+                else if (indexOfI >= 1 && indexOfI < text.Length - 2 && "“\"".Contains(text[indexOfI - 1]) && " .?!".Contains(text[indexOfI + 1]))
+                {
+                    text = text.Remove(indexOfI, 1).Insert(indexOfI, "I");
+                }
+                else if (indexOfI > 2 && text.AsSpan(indexOfI - 2).StartsWith("I-i ".AsSpan(), StringComparison.Ordinal))
+                {
+                    text = text.Remove(indexOfI - 2, 3).Insert(indexOfI - 2, "I-I");
+                }
+                else if (indexOfI > 2 && text.AsSpan(indexOfI - 2).StartsWith("I-it's ".AsSpan(), StringComparison.Ordinal))
+                {
+                    text = text.Remove(indexOfI - 2, 3).Insert(indexOfI - 2, "I-I");
+                }
+                else if (text.AsSpan(indexOfI).StartsWith("i'll ".AsSpan(), StringComparison.Ordinal))
+                {
+                    text = text.Remove(indexOfI, 1).Insert(indexOfI, "I");
+                }
+                else if (text.AsSpan(indexOfI).StartsWith("i've ".AsSpan(), StringComparison.Ordinal))
+                {
+                    text = text.Remove(indexOfI, 1).Insert(indexOfI, "I");
+                }
+                else if (text.AsSpan(indexOfI).StartsWith("i'm ".AsSpan(), StringComparison.Ordinal))
+                {
+                    text = text.Remove(indexOfI, 1).Insert(indexOfI, "I");
+                }
+                else if (text.AsSpan(indexOfI).StartsWith("i'd ".AsSpan(), StringComparison.Ordinal))
+                {
+                    text = text.Remove(indexOfI, 1).Insert(indexOfI, "I");
+                }
+            }
+            return text;
+        }
+
+        private static readonly string[] CasingTitles = { "Mrs.", "Miss.", "Mr.", "Ms.", "Dr." };
+        private static readonly string[] CasingNotChangeWords = { "does", "has", "will", "is", "and", "for", "but", "or", "of" };
+        private static readonly char[] TitleWordDelimiters = { ' ', '\r', '\n', ',', '"', '?', '!', '.', '\'' };
+
+        private static bool IsCasingNotChangeWord(ReadOnlySpan<char> word)
+        {
+            foreach (var w in CasingNotChangeWords)
+            {
+                if (word.SequenceEqual(w.AsSpan()))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private string FixCasingAfterTitles(string input)
+        {
+            var text = input;
+            for (int i = 0; i < text.Length - 4; i++)
+            {
+                // Compare against the tail in place - taking a Substring here allocated the
+                // rest of the line for every character position (quadratic on long lines).
+                var start = text.AsSpan(i);
+                foreach (var title in CasingTitles)
+                {
+                    if (start.StartsWith(title.AsSpan(), StringComparison.OrdinalIgnoreCase))
+                    {
+                        var idx = i + title.Length;
+                        // The body reads text[idx] after the increment below, so the bound only
+                        // needs to leave one character - "- 2" skipped a one-letter word at the
+                        // end of the line ("Mr. t" was left alone while "Mr. to" was fixed).
+                        if (idx < text.Length - 1 && text[idx] == ' ')
+                        {
+                            idx++;
+                            // First word only - splitting the whole rest of the line allocated an array per title hit.
+                            var wordEnd = text.IndexOfAny(TitleWordDelimiters, idx);
+                            var firstWord = wordEnd < 0 ? text.AsSpan(idx) : text.AsSpan(idx, wordEnd - idx);
+                            if (!IsCasingNotChangeWord(firstWord))
+                            {
+                                var upper = char.ToUpperInvariant(text[idx]).ToString();
+                                text = text.Remove(idx, 1).Insert(idx, upper);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            return text;
+        }
+
+        public static string FixStutter(string text)
+        {
+            if (!text.Contains("-"))
+            {
+                return text;
+            }
+
+            var sb = new StringBuilder(text.Length);
+            bool firstLetter = true;
+            bool tagOn = false;
+            var index = 0;
+            while (index < text.Length)
+            {
+                var ch = text[index];
+                if (ch == '<' || ch == '{')
+                {
+                    tagOn = true;
+                }
+                else if (ch == '>' || ch == '}')
+                {
+                    tagOn = false;
+                }
+                else if (ch == '.' || ch == '!' || ch == '?')
+                {
+                    firstLetter = true;
+                }
+                else if (!tagOn && char.IsLetter(ch))
+                {
+                    if (firstLetter && index < text.Length - 5 && char.IsUpper(text[index]) &&
+                        text[index + 1] == '-' && char.IsLower(text[index + 2]) && text[index] == char.ToUpperInvariant(text[index + 2]) &&
+                        text[index + 3] == '-' && char.IsLower(text[index + 4]) && text[index] == char.ToUpperInvariant(text[index + 4]) &&
+                        text[index + 5] != '-')
+                    {
+                        sb.Append(text[index]);
+                        sb.Append('-');
+                        sb.Append(text[index]);
+                        sb.Append('-');
+                        index += 4;
+                    }
+                    else if (firstLetter && index < text.Length - 3 && char.IsUpper(text[index]) &&
+                             text[index + 1] == '-' && char.IsLower(text[index + 2]) && text[index] == char.ToUpperInvariant(text[index + 2]) &&
+                             text[index + 3] != '-')
+                    {
+                        sb.Append(text[index]);
+                        sb.Append('-');
+                        index += 2;
+                    }
+                    firstLetter = false;
+                }
+                sb.Append(ch);
+                index++;
+            }
+
+            return sb.ToString();
+        }
+
+        private string Fix(string original, string lastLine, List<string> nameList, CultureInfo subtitleCulture, double millisecondsFromLast)
+        {
+            if (lastLine == null)
+            {
+                lastLine = string.Empty;
+            }
+            lastLine = HtmlUtil.RemoveHtmlTags(lastLine, true).Trim();
+
+            var text = original;
+            if (FixNormal)
+            {
+                if (FixNormalOnlyAllUppercase)
+                {
+                    var noTags = HtmlUtil.RemoveHtmlTags(text, true);
+                    if (noTags != noTags.ToUpper(subtitleCulture))
+                    {
+                        return text;
+                    }
+                }
+
+                if (text.Length > 1)
+                {
+                    // first all to lower
+                    text = text.ToLowercaseButKeepTags().Trim();
+                    text = text.FixExtraSpaces();
+                    var st = new StrippableText(text);
+                    st.FixCasing(nameList, false, true, true, lastLine, millisecondsFromLast); // fix all casing but names (that's a separate option)
+                    text = st.MergedString;
+                }
+            }
+            else if (FixMakeUppercase)
+            {
+                var st = new StrippableText(text);
+                text = st.Pre + MakeUpperCaseExceptTags(st.StrippedText, subtitleCulture) + st.Post;
+                text = HtmlUtil.FixUpperTags(text); // tags inside text
+            }
+            else if (FixMakeLowercase)
+            {
+                text = MakeLowerCaseExceptTags(text, subtitleCulture);
+            }
+            else if (FixMakeProperCase)
+            {
+                if (FixProperCaseOnlyAllUppercase)
+                {
+                    var stripped = HtmlUtil.RemoveHtmlTags(text, true);
+                    if (stripped == stripped.ToUpperInvariant())
+                    {
+                        text = text.ToProperCase(Format);
+                    }
+                }
+                else
+                {
+                    text = text.ToProperCase(Format);
+                }
+            }
+
+            if (original != text)
+            {
+                NoOfLinesChanged++;
+            }
+
+            return text;
+        }
+
+        // The case conversion follows the SUBTITLE's language, not the machine's: char.ToUpper /
+        // char.ToLower without a culture use CurrentCulture, so on a Turkish system every "i" in
+        // an English subtitle became "I-with-dot" and every "I" became a dotless "i".
+        private string MakeUpperCaseExceptTags(string text, CultureInfo culture)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return text;
+            }
+
+            return string.Create(text.Length, (text, culture), (span, state) =>
+            {
+                var (src, ci) = state;
+                var insideAngle = false;
+                var insideCurly = false;
+
+                for (var i = 0; i < span.Length; i++)
+                {
+                    var c = src[i];
+                    if (c == '<')
+                    {
+                        insideAngle = true;
+                    }
+                    else if (c == '>')
+                    {
+                        insideAngle = false;
+                    }
+                    else if (c == '{')
+                    {
+                        insideCurly = true;
+                    }
+                    else if (c == '}')
+                    {
+                        insideCurly = false;
+                    }
+
+                    span[i] = insideAngle || insideCurly ? c : char.ToUpper(c, ci);
+                }
+            });
+        }
+
+        private string MakeLowerCaseExceptTags(string text, CultureInfo culture)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return text;
+            }
+
+            return string.Create(text.Length, (text, culture), (span, state) =>
+            {
+                var (src, ci) = state;
+                var insideAngle = false;
+                var insideCurly = false;
+
+                for (var i = 0; i < span.Length; i++)
+                {
+                    var c = src[i];
+                    if (c == '<')
+                    {
+                        insideAngle = true;
+                    }
+                    else if (c == '>')
+                    {
+                        insideAngle = false;
+                    }
+                    else if (c == '{')
+                    {
+                        insideCurly = true;
+                    }
+                    else if (c == '}')
+                    {
+                        insideCurly = false;
+                    }
+
+                    span[i] = insideAngle || insideCurly ? c : char.ToLower(c, ci);
+                }
+            });
+        }
+    }
+}

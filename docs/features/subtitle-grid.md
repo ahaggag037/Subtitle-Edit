@@ -1,0 +1,118 @@
+# Subtitle Grid
+
+The subtitle grid is the main area for viewing and managing all subtitle lines.
+
+<!-- Screenshot: Subtitle grid -->
+![Subtitle Grid](../screenshots/subtitle-grid.png)
+
+## Columns
+
+The grid can show the columns below. A few are always visible; the others can be toggled on or off via the column header context menu, and the whole set can be reordered in the **Columns...** dialog (see [Customizing Visible Columns](#customizing-visible-columns) below).
+
+| Column | Always visible | Description |
+|--------|---------------|-------------|
+| **#** | ✓ | Line number (also shows a bookmark icon when the line is bookmarked) |
+| **Show** | | Start time — when the subtitle appears |
+| **Hide** | | End time — when the subtitle disappears |
+| **Duration** | | How long the subtitle is displayed |
+| **Text** | ✓ | The subtitle text |
+| **Original text** | | The original text (visible in translation mode) |
+| **Style** | | Style name (only available for formats that support styles, e.g. ASS/SSA) |
+| **Gap** | | Time gap to the next subtitle line |
+| **Actor** | | Actor/speaker name |
+| **CPS** | | Characters per second (reading speed indicator) |
+| **WPM** | | Words per minute |
+| **Pixel width** | | Rendered pixel width of the text |
+| **Forced** | | Check mark on lines marked as forced narrative (set with **Toggle forced** in the context menu) |
+| **Layer** | | Layer number (only available for formats that support layers, e.g. ASS/SSA) |
+
+## Customizing Visible Columns
+
+Right-click anywhere in the **column header row** to open the column visibility menu. Each toggleable column is listed with a checkmark (✓) next to it when it is currently visible. Click a column name to toggle it on or off.
+
+> **Note:** The **Style** and **Layer** columns only appear in the menu when the loaded subtitle format supports them (e.g. ASS/SSA).
+
+**Columns...** at the bottom of the same menu opens a dialog where columns can be shown/hidden and reordered.
+
+<!-- Screenshot: Subtitle grid column header right-click menu showing column toggle options -->
+![Subtitle Grid Column Menu](../screenshots/subtitle-grid-column-menu.png)
+
+## Selecting Lines
+
+- **Click** — Select a single line
+- **Ctrl+Click** — Add/remove a line from selection
+- **Shift+Click** — Select a range of lines
+- **Ctrl+A** — Select all lines
+
+## Context Menu
+
+Right-click a line to access:
+- Delete
+- Insert before / Insert after
+- Insert subtitle after current line... (insert a whole subtitle file)
+- Column (delete text, insert text, paste from clipboard, shift cells up/down, text up/down)
+- Split line / Assisted split... / Assisted move...
+- Merge before / Merge after / Merge selected / Merge selected as dialog
+- Extend to line before / Extend to line after
+- Remove formatting (all, bold, italic, underline, color, font name, alignment)
+- Italic / Bold / Color... / Font name... / Alignment...
+- Bookmark...
+- Toggle forced
+- Selected lines... (Speech to text, Auto translate, Change casing, Set layer, Fix common errors, Save as..., etc.)
+- Save forced lines as...
+
+## Setting Actors (ASS/SSA)
+
+For ASS/SSA files the context menu has an **Actors** submenu, and these shortcuts can be assigned in **Options → Shortcuts**. They all work with focus in the grid, the text box or the waveform:
+
+- **Set actor...** opens the actor picker: every actor in the file with its number key, line count and "Set actor N" shortcut.
+  - Press <kbd>1</kbd>–<kbd>9</kbd> or <kbd>0</kbd> to set one of the first ten actors on the selected lines.
+  - Type to filter a long cast, then press <kbd>Enter</kbd> to set the highlighted actor. A name that does not exist yet can be added as a new actor.
+  - <kbd>Alt</kbd>+<kbd>Up</kbd>/<kbd>Down</kbd> moves the highlighted actor, e.g. to put the main characters on the number keys. <kbd>Delete</kbd> removes the actor from the selected lines.
+- **Set actor: 1** … **Set actor: 10** set the first ten actors directly.
+- **Set new actor...** and **Actor - Remove**.
+
+The actor order is alphabetical when a file is opened. Actors added while working are appended at the end, so a number keeps pointing at the same actor for the rest of the session.
+
+## Keyboard Shortcuts (Grid)
+
+| Shortcut | Action |
+|----------|--------|
+| `Delete` | Delete selected lines |
+| `Ctrl+A` | Select all |
+| `Ctrl+C` | Copy |
+| `Ctrl+V` | Paste |
+| `Ctrl+X` | Cut |
+| `Enter` | Go to subtitle and set video position (default; **Options → Settings** can change it to *Go to next line*) |
+| `Up/Down` | Navigate lines |
+
+### Pasting over several lines
+
+With **one** line selected, `Ctrl+V` inserts the clipboard content below it. With **several** lines selected, the clipboard is pasted *over* the selection instead — handy for translating: copy the lines out, translate them elsewhere, select the same lines here and paste.
+
+- Clipboard holds a subtitle (SRT, ASSA, …): the selected lines are replaced by the pasted ones, time codes included. The number of pasted lines does not have to match the selection.
+- Clipboard holds plain text: one clipboard line goes into each selected line's text, and the time codes are left alone. Clipboard lines that go past the end of the selection are not pasted.
+
+Both are a normal edit, so `Ctrl+Z` undoes them.
+
+## Formatting Display
+
+How the grid treats HTML/ASSA markup is a five-way choice — **Show formatted (HTML/ASSA) text in subtitle grid** in **Options → Settings → Appearance**:
+
+| Mode | What the grid shows |
+|------|---------------------|
+| **Show formatting** | The tags are hidden and what they mean is rendered — italic, bold, color, font size. The default |
+| **Show formatting, keep non-visual tags** | Like *Show formatting*, but tags the grid cannot render — position, alignment, animation, borders, karaoke timing and other HTML tags — stay visible as text, so you can still see that a line is positioned or animated |
+| **Show tags** | The text with its tags, with the tags colored so they are easy to pick out |
+| **No formatting** | The raw text exactly as it is stored |
+| **Hide tags** | The markup is stripped and only the dialogue is drawn, as plain themed text — no colors, fonts or sizes. Useful for translation, where the styling is only a distraction. Vector drawing tags are dropped too |
+
+A shortcut can be assigned in **Options → Shortcuts** to cycle the five modes on the fly; the status bar names the mode you land on.
+
+## Bookmarks
+
+You can bookmark subtitle lines for quick reference:
+- **Add/Edit bookmark** — Adds a bookmark with optional text
+- **Toggle bookmark** — Quickly toggle bookmark on/off
+- **List bookmarks** — View all bookmarks
+- **Go to next/previous bookmark** — Navigate between bookmarks

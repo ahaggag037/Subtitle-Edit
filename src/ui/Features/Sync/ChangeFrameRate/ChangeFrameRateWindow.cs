@@ -1,0 +1,150 @@
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Layout;
+using Avalonia.Data;
+using Avalonia.Media;
+using Nikse.SubtitleEdit.Logic;
+using Nikse.SubtitleEdit.Logic.Config;
+using Optris.Icons.Avalonia;
+using System.Globalization;
+
+namespace Nikse.SubtitleEdit.Features.Sync.ChangeFrameRate;
+
+public class ChangeFrameRateWindow : Window
+{
+    public ChangeFrameRateWindow(ChangeFrameRateViewModel vm)
+    {
+        UiUtil.InitializeWindow(this, GetType().Name);
+        Title = UiUtil.MakeWindowTitle(Se.Language.General.ChangeFrameRate);
+        SizeToContent = SizeToContent.WidthAndHeight;
+        CanResize = false;
+        vm.Window = this;
+        DataContext = vm;
+
+        // Where the preset "from" rate came from: the loaded video's name and detected frame rate.
+        var videoIcon = new ContentControl
+        {
+            Width = 16,
+            Height = 16,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 6, 0),
+        };
+        Attached.SetIcon(videoIcon, IconNames.MovieOpenOutline);
+        var textVideoInfo = new TextBlock
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxWidth = 420,
+        }.WithBindText(vm, nameof(vm.VideoInfoText));
+        var panelVideoInfo = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Opacity = 0.85,
+            Margin = new Thickness(0, 0, 0, 4),
+            Children = { videoIcon, textVideoInfo },
+        }.WithBindIsVisible(nameof(vm.HasVideo));
+        ToolTip.SetTip(panelVideoInfo, vm.VideoFileName);
+        ToolTip.SetTip(textVideoInfo, vm.VideoFileName);
+
+        var labelFromFrameRate = new Label
+        {
+            Content = Se.Language.Sync.FromFrameRate,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        var comboFromFrameRate = new ComboBox
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            MinWidth = 90,
+            DisplayMemberBinding = FrameRateDisplayBinding(),
+        }
+        .WithBindItemsSource(nameof(vm.FromFrameRates))
+        .WithBindSelected(nameof(vm.SelectedFromFrameRate));
+
+        var buttonFromFrameRate = UiUtil.MakeButtonBrowse(vm.BrowseFromFrameRateCommand, accessibleName: Se.Language.Sync.FromFrameRate);
+
+        var buttonSwitch = UiUtil.MakeButton(vm.SwitchFrameRatesCommand, IconNames.SwapVertical,
+            $"{Se.Language.Sync.FromFrameRate} <-> {Se.Language.Sync.ToFrameRate}");
+
+        var labelToFrameRate = new Label
+        {
+            Content = Se.Language.Sync.ToFrameRate,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        var comboToFrameRate = new ComboBox
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            MinWidth = 90,
+            DisplayMemberBinding = FrameRateDisplayBinding(),
+        }
+        .WithBindItemsSource(nameof(vm.ToFrameRates))
+        .WithBindSelected(nameof(vm.SelectedToFrameRate));
+
+        var buttonToFrameRate = UiUtil.MakeButtonBrowse(vm.BrowseToFrameRateCommand, accessibleName: Se.Language.Sync.ToFrameRate);
+
+        var buttonOk = UiUtil.MakeButtonOk(vm.OkCommand);
+        var buttonCancel = UiUtil.MakeButtonCancel(vm.CancelCommand);
+        var buttonPanel = UiUtil.MakeButtonBar(buttonOk, buttonCancel);
+        
+        var grid = new Grid
+        {
+            RowDefinitions =
+            {
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Star) },
+            },
+            ColumnDefinitions =
+            {
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) },
+            },
+            Margin = UiUtil.MakeWindowMargin(),
+            ColumnSpacing = 10,
+            RowSpacing = 10,
+            Width = double.NaN,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+
+        var row = 0;
+        grid.Add(panelVideoInfo, row, 0, 1, 4);
+        row++;
+
+        grid.Add(labelFromFrameRate, row, 0);
+        grid.Add(comboFromFrameRate, row, 1);
+        grid.Add(buttonFromFrameRate, row, 2);
+        grid.Add(buttonSwitch, row, 3, 2);
+        row++;
+
+        grid.Add(labelToFrameRate, row, 0);
+        grid.Add(comboToFrameRate, row, 1);
+        grid.Add(buttonToFrameRate, row, 2);
+        row++;
+
+        grid.Add(buttonPanel, row, 0, 1, 4);
+
+        Content = grid;
+        
+        UiUtil.FocusOnFirstActivation(this, comboFromFrameRate); // initial focus on an input, not an action button - a focused button clicks on bare Space
+        Loaded += (_, _) => UiUtil.RestoreWindowPosition(this);
+        Closing += (_, _) => UiUtil.SaveWindowPosition(this);
+        KeyDown += (_, e) => vm.OnKeyDown(e);
+    }
+
+    /// <summary>
+    /// Frame rates always print with a decimal point ("23.976"), like the toolbar combo and the
+    /// video line - a bare double item would take the OS decimal separator ("23,976").
+    /// </summary>
+    private static Binding FrameRateDisplayBinding()
+    {
+        return new Binding(".")
+        {
+            StringFormat = "{0:0.###}",
+            ConverterCulture = CultureInfo.InvariantCulture,
+        };
+    }
+}

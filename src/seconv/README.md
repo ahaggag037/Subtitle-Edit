@@ -1,0 +1,68 @@
+# SeConv — Subtitle Edit Command Line Converter
+
+A modern, headless command-line utility for batch converting subtitle files between formats.
+It reuses Subtitle Edit's core libraries (libse, libuilogic), so `seconv` supports the same
+formats, operations, and OCR engines as the desktop app — without any Avalonia / GUI dependency.
+Cross-platform (Windows, Linux, macOS); only needs the .NET 10 runtime.
+
+## What it does
+
+- 380+ subtitle formats (text, binary, image-based)
+- Container input: Matroska (.mkv/.mks), MP4, MCC, MXF, AVI (.avi/.divx), transport stream teletext
+- OCR for image-based sources (Blu-ray .sup, VobSub .sub/.idx, MKV PGS/VobSub, MP4 VobSub, TS DVB-sub, AVI XSUB)
+  via seven engines: Tesseract, nOCR, BinaryOCR, Ollama, llama.cpp, PaddleOCR, Apple Vision (macOS) — or `--time-codes-only` to skip OCR
+- Image-based output and image-to-image conversion (preserve source bitmaps, no OCR)
+- Full operation pipeline: offset, fps change, renumber, adjust-duration, fix-common-errors,
+  merge/split, balance, redo casing, RTL fixes, multiple-replace, custom-text format, plain text
+
+## Build
+
+```bash
+dotnet build src/seconv/SeConv.csproj
+```
+
+The executable is `seconv` / `seconv.exe`.
+
+## Quick start
+
+```bash
+seconv <pattern> <format> [options]
+seconv <pattern> --format <name> [options]   # alternative syntax
+
+seconv *.srt webvtt                                               # SRT → WebVTT
+seconv movie.srt subrip --encoding:source --fix-common-errors    # keep encoding, clean up
+seconv movie.mkv subrip --track-number:3                         # extract MKV text track #3
+seconv movie.sup subrip --ocr-engine:tesseract --ocr-language:eng # OCR a Blu-ray .sup
+seconv *.mkv subrip --ocr-engine:applevision                     # macOS: OCR MKV PGS tracks with built-in Vision
+seconv movie.sup subrip --time-codes-only                        # timing only, no OCR
+seconv movie.sup subrip --ocr-auto-detect-assa-alignment         # OCR + {\an8} etc. from each image's position
+seconv movie.avi subrip --ocr-engine:tesseract --ocr-language:eng # OCR the XSUB subtitles of an .avi
+seconv subs.srt bluraysup --resolution:1920x1080                 # render text → Blu-ray sup
+seconv dump-settings > my.json                                   # starter --settings file (libse defaults)
+```
+
+Run `seconv` with no arguments for built-in help, or `seconv formats` to list every format.
+
+## Scripting
+
+Every subcommand takes `--json`, and so does a conversion run. Under `--json`, stdout is one
+JSON document on success and on failure alike — a usage error arrives in the same envelope as
+a failed conversion, so nothing has to be parsed out of stderr.
+
+```bash
+seconv --help-json                              # the whole command line as JSON, reflected off the parser
+seconv formats --json | jq -r '.formats[].id'   # exact tokens --format accepts
+seconv movie.srt subrip --json                  # per-file results
+```
+
+An unrecognised option is an error, never a silent no-op: `seconv` exits 1 and names the closest
+real option rather than converting the file without the operation that was asked for. Exit codes
+are only ever 0 (success) or 1 (any failure).
+
+## Full reference
+
+➡ **[Command Line (seconv) — full reference](../../docs/reference/command-line.md)**
+
+The canonical reference documents every option, OCR setup, the operations pipeline, output-format
+aliases, templates/replacements, exit codes, and more examples. To avoid drift, detailed docs live
+there (and at [docs/features/seconv.md](../../docs/features/seconv.md)) rather than being duplicated here.

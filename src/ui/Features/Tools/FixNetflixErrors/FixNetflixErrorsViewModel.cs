@@ -1,0 +1,448 @@
+using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Interactivity;
+using Avalonia.Threading;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Nikse.SubtitleEdit.Core.Common;
+using Nikse.SubtitleEdit.Features.Files.RestoreAutoBackup;
+using Nikse.SubtitleEdit.Features.Shared;
+using Nikse.SubtitleEdit.Features.Shared.PromptFileSaved;
+using Nikse.SubtitleEdit.Logic;
+using Nikse.SubtitleEdit.Logic.Config;
+using Nikse.SubtitleEdit.Logic.Media;
+using Nikse.SubtitleEdit.Logic.NetflixQualityCheck;
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Timers;
+using Nikse.SubtitleEdit.UiLogic.Media;
+
+namespace Nikse.SubtitleEdit.Features.Tools.FixNetflixErrors;
+
+public partial class FixNetflixErrorsViewModel : ObservableObject, IClosingCleanup
+{
+    public class LanguageItem
+    {
+        public string Code { get; }
+        public string Name { get; }
+
+        public LanguageItem(string code, string name)
+        {
+            Code = code;
+            Name = name;
+        }
+
+        public override string ToString()
+        {
+            return Name;
+        }
+
+        public static List<LanguageItem> GetAll()
+        {
+            return Iso639Dash2LanguageCode.List
+                .Select(p => new LanguageItem(p.TwoLetterCode, p.EnglishName))
+                .OrderBy(p => p.Name)
+                .ToList();
+        }
+    }
+
+    [ObservableProperty] private DisplayFile? _selectedFile;
+    [ObservableProperty] private ObservableCollection<LanguageItem> _languages;
+    [ObservableProperty] private LanguageItem? _selectedLanguage;
+    [ObservableProperty] private ObservableCollection<FixNetflixErrorsItem> _fixes;
+    [ObservableProperty] private string _fixesSummaryText = string.Empty;
+    [ObservableProperty] private FixNetflixErrorsItem? _selectedFix;
+    [ObservableProperty] private string _fixText;
+    [ObservableProperty] private bool _fixTextEnabled;
+    [ObservableProperty] private bool _isChildrenProgram;
+    [ObservableProperty] private bool _isSdh;
+
+    // New: selectable list of Netflix checks
+    [ObservableProperty] private ObservableCollection<NetflixCheckDisplayItem> _checks = new();
+
+    public Window? Window { get; set; }
+
+    public bool OkPressed { get; private set; }
+    public Subtitle FixedSubtitle { get; private set; }
+
+    private Subtitle _subtitle;
+    private string _videoFileName;
+    private readonly Timer _timer;
+    private volatile bool _isClosing;
+    private bool _dirty;
+    private readonly List<Paragraph> _edited;
+
+    private readonly IWindowService _windowService;
+    private readonly IFileHelper _fileHelper;
+    private FfmpegMediaInfo2? _mediaInfo;
+
+    public FixNetflixErrorsViewModel(IWindowService windowService, IFileHelper fileHelper)
+    {
+        _windowService = windowService;
+        _fileHelper = fileHelper;
+
+        Languages = new ObservableCollection<LanguageItem>(LanguageItem.GetAll());
+        Fixes = new ObservableCollection<FixNetflixErrorsItem>();
+        FixText = string.Empty;
+        _edited = new List<Paragraph>();
+        _timer = new Timer(500);
+        _timer.Elapsed += TimerElapsed;
+        FixedSubtitle = new Subtitle();
+        _subtitle = new Subtitle();
+        _videoFileName = string.Empty;
+    }
+
+    public void Initialize(Subtitle subtitle, string videoFileName)
+    {
+        // Snapshot with the ids kept: the caller hands over the live working subtitle, which the
+        // auto-backup timer rebuilds (fresh paragraph ids) on any tick while this dialog is open.
+        // Reading it again at OK time would then hand back ids the caller's row map has never
+        // seen, and the id-based apply (#14053) degrades to a full row rebuild that empties the
+        // original column. Fix common errors snapshots the same way.
+        _subtitle = new Subtitle(subtitle, false);
+        _videoFileName = videoFileName;
+
+        _ = Task.Run(() =>
+        {
+            _mediaInfo = FfmpegMediaInfo2.Parse(videoFileName);
+        });
+
+        LoadSettings();
+        LoadChecks();
+        SetDirty();
+    }
+
+    private void LoadChecks()
+    {
+        Checks.Clear();
+        var saved = Se.Settings.Tools.FixNetflixErrors.SelectedRules;
+        var hasSaved = saved.Count > 0;
+        foreach (var checker in NetflixQualityController.GetAllCheckers())
+        {
+            var isSelected = !hasSaved || saved.Contains(checker.GetType().Name);
+            Checks.Add(new NetflixCheckDisplayItem(checker, checker.Name, isSelected));
+        }
+    }
+
+    private void LoadSettings()
+    {
+        IsChildrenProgram = Se.Settings.Tools.FixNetflixErrors.IsChildrenProgram;
+        IsSdh = Se.Settings.Tools.FixNetflixErrors.IsSdh;
+    }
+
+    private void SaveSettings()
+    {
+        Se.Settings.Tools.FixNetflixErrors.SelectedRules = Checks
+            .Where(c => c.IsSelected)
+            .Select(c => c.Checker.GetType().Name)
+            .ToList();
+        Se.Settings.Tools.FixNetflixErrors.IsChildrenProgram = IsChildrenProgram;
+        Se.Settings.Tools.FixNetflixErrors.IsSdh = IsSdh;
+        Se.SaveSettings();
+    }
+
+    [RelayCommand]
+    private async Task GenerateReport()
+    {
+        if (Window == null || SelectedLanguage == null)
+        {
+            return;
+        }
+
+        if (Fixes.Count == 0)
+        {
+            await MessageBox.Show(Window, Se.Language.General.Error, Se.Language.Tools.NetflixCheckAndFix.NothingToReport, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        var csvBuilder = new StringBuilder();
+
+        // Header
+        csvBuilder.AppendLine("LineNumber,TimeCode,Context,Comment");
+
+        // Rows
+        foreach (var fix in Fixes)
+        {
+            csvBuilder.AppendLine(fix.Record.ToCsvRow());
+        }
+
+        var fileName = await _fileHelper.PickSaveFile(Window, ".csv", "netflix_report.csv", Se.Language.Tools.NetflixCheckAndFix.SaveNetflixQualityReport);
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return;
+        }
+
+        await System.IO.File.WriteAllTextAsync(fileName, csvBuilder.ToString());
+
+        _ = await _windowService.ShowDialogAsync<PromptFileSavedWindow, PromptFileSavedViewModel>(Window, vm =>
+        {
+            vm.Initialize(Se.Language.Tools.NetflixCheckAndFix.NetflixReportSaved, string.Format(Se.Language.Tools.NetflixCheckAndFix.NetFlixQualityReportSavedToX,  fileName), fileName, true, true);
+        });
+    }
+
+    [RelayCommand]
+    private void Ok()
+    {
+        SaveSettings();
+        OkPressed = true;
+        FixedSubtitle = new Subtitle(_subtitle, false);
+        FixedSubtitle.Paragraphs.Clear();
+        for (var index = 0; index < _subtitle.Paragraphs.Count; index++)
+        {
+            var p = _subtitle.Paragraphs[index];
+            var fixedParagraph = Fixes.FirstOrDefault(ri => ri.Index == index);
+            if (fixedParagraph != null && fixedParagraph.Apply)
+            {
+                // Apply the whole fixed paragraph, not just its text: writing only Text left
+                // every timing fix (minimum duration, gaps, shot changes) with no effect at all.
+                var fixedFrom = fixedParagraph.Record?.FixedParagraph;
+                if (fixedFrom != null)
+                {
+                    p.Text = fixedFrom.Text;
+                    p.StartTime.TotalMilliseconds = fixedFrom.StartTime.TotalMilliseconds;
+                    p.EndTime.TotalMilliseconds = fixedFrom.EndTime.TotalMilliseconds;
+                }
+                else
+                {
+                    p.Text = fixedParagraph.After;
+                }
+            }
+
+            FixedSubtitle.Paragraphs.Add(p);
+        }
+
+        FixedSubtitle.RemoveEmptyLines();
+
+        Window?.Close();
+    }
+
+    [RelayCommand]
+    private void Cancel()
+    {
+        Window?.Close();
+    }
+
+    [RelayCommand]
+    private void ChecksSelectAll()
+    {
+        foreach (var c in Checks)
+        {
+            c.IsSelected = true;
+        }
+        SetDirty();
+    }
+
+    [RelayCommand]
+    private void ChecksInverseSelection()
+    {
+        foreach (var c in Checks)
+        {
+            c.IsSelected = !c.IsSelected;
+        }
+        SetDirty();
+    }
+
+    private void TimerElapsed(object? sender, ElapsedEventArgs e)
+    {
+        if (_isClosing)
+        {
+            return;
+        }
+
+        _timer.Stop();
+
+        try
+        {
+            if (_dirty)
+            {
+                _dirty = false;
+                Dispatcher.UIThread.Invoke(GeneratePreview);
+            }
+        }
+        catch
+        {
+            return;
+        }
+
+        // Guard the restart: OnClosingCleanup may have disposed the timer while this handler ran,
+        // and Start() on a disposed timer throws ObjectDisposedException (no longer swallowed on
+        // modern .NET), crashing the app from a thread-pool thread. (#12739)
+        if (!_isClosing)
+        {
+            _timer.Start();
+        }
+    }
+
+    /// <summary>
+    /// Runs on every close path via the central hook in <see cref="UiUtil.InitializeWindow"/>.
+    /// Without it the preview timer kept ticking - and the view model, its subtitle and the closed
+    /// window's fix list stayed alive with it - for the rest of the session, once per dialog open.
+    /// </summary>
+    public void OnClosingCleanup()
+    {
+        _isClosing = true;
+        _timer.StopAndDispose(TimerElapsed);
+    }
+
+    private void GeneratePreview()
+    {
+        // Build selected checks list
+        var selectedChecks = Checks.Where(c => c.IsSelected).Select(c => c.Checker).ToList();
+        Fixes.Clear();
+        FixesSummaryText = string.Empty;
+
+        if (_subtitle.Paragraphs.Count == 0 || selectedChecks.Count == 0)
+        {
+            return;
+        }
+
+        var controller = new NetflixQualityController
+        {
+            Language = SelectedLanguage?.Code ?? "en",
+            FrameRate = (double)(_mediaInfo?.FramesRate ?? (decimal)Configuration.Settings.General.CurrentFrameRate),
+            VideoFileName = _videoFileName,
+            IsChildrenProgram = IsChildrenProgram,
+            IsSDH = IsSdh,
+        };
+
+        controller.RunChecks(_subtitle, selectedChecks);
+
+        // Map paragraph to proposed text changes (ignore pure timing-only changes for now)
+        var fixMap = new Dictionary<int, (string Before, string After, Paragraph P, NetflixQualityController.Record)>();
+
+        // A check can flag most lines, so a Paragraphs.IndexOf per record is quadratic.
+        var paragraphIndexes = new Dictionary<Paragraph, int>(_subtitle.Paragraphs.Count);
+        for (var i = 0; i < _subtitle.Paragraphs.Count; i++)
+        {
+            paragraphIndexes.TryAdd(_subtitle.Paragraphs[i], i);
+        }
+
+        foreach (var r in controller.Records)
+        {
+            if (r.OriginalParagraph == null)
+            {
+                continue;
+            }
+
+            if (!paragraphIndexes.TryGetValue(r.OriginalParagraph, out var idx))
+            {
+                continue;
+            }
+
+            if (r.FixedParagraph == null)
+            {
+                continue;
+            }
+
+            var before = r.OriginalParagraph.Text;
+            var after = r.FixedParagraph.Text;
+            var textChanged = !string.IsNullOrEmpty(after) && !string.Equals(before, after, StringComparison.Ordinal);
+
+            // Several checks (minimum duration, two-frames gap, maximum duration, bridge gaps,
+            // shot changes) produce a fix that only moves the times - comparing text alone meant
+            // those never became a fixable row at all, so the tool could report them but never
+            // correct them.
+            var timesChanged =
+                Math.Abs(r.OriginalParagraph.StartTime.TotalMilliseconds - r.FixedParagraph.StartTime.TotalMilliseconds) > 0.5 ||
+                Math.Abs(r.OriginalParagraph.EndTime.TotalMilliseconds - r.FixedParagraph.EndTime.TotalMilliseconds) > 0.5;
+
+            if (!textChanged && !timesChanged)
+            {
+                continue;
+            }
+
+            if (!textChanged)
+            {
+                // Nothing to show in a text diff - show the timing change instead.
+                before = r.OriginalParagraph.StartTime.ToDisplayString() + " --> " + r.OriginalParagraph.EndTime.ToDisplayString();
+                after = r.FixedParagraph.StartTime.ToDisplayString() + " --> " + r.FixedParagraph.EndTime.ToDisplayString();
+            }
+
+            // If multiple fixes affect the same paragraph, keep last suggestion
+            fixMap[idx] = (before, after, r.OriginalParagraph, r);
+        }
+
+        if (fixMap.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var kvp in fixMap.OrderBy(k => k.Key))
+        {
+            var index = kvp.Key;
+            var (before, after, p, r) = kvp.Value;
+            var item = new FixNetflixErrorsItem(r.CanBeFixed, index, before, after, p, r);
+            item.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName == nameof(FixNetflixErrorsItem.Apply))
+                {
+                    UpdateFixesSummary();
+                }
+            };
+            Fixes.Add(item);
+        }
+
+        UpdateFixesSummary();
+    }
+
+    private void UpdateFixesSummary()
+    {
+        FixesSummaryText = Fixes.Count == 0
+            ? string.Empty
+            : string.Format(Se.Language.Tools.FixCommonErrors.XFixesYSelected, Fixes.Count, Fixes.Count(f => f.Apply));
+    }
+
+    partial void OnSelectedLanguageChanged(LanguageItem? value)
+    {
+        SetDirty();
+    }
+
+    partial void OnIsChildrenProgramChanged(bool value)
+    {
+        SetDirty();
+    }
+
+    partial void OnIsSdhChanged(bool value)
+    {
+        SetDirty();
+    }
+
+    internal void OnKeyDown(KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape)
+        {
+            e.Handled = true;
+            Window?.Close();
+        }
+        else if (UiUtil.IsHelp(e))
+        {
+            e.Handled = true;
+            UiUtil.ShowHelp("features/netflix-errors");
+        }
+    }
+
+    public void OnLoaded(RoutedEventArgs routedEventArgs)
+    {
+        var languageCode = LanguageAutoDetect.AutoDetectGoogleLanguageOrNull(_subtitle) ?? "en";
+        SelectedLanguage = Languages.FirstOrDefault(l => l.Code == languageCode) ??
+            Languages.FirstOrDefault(l => l.Code == "en");
+
+        _timer.Start();
+
+        if (Checks.Count == 0)
+        {
+            LoadChecks();
+        }
+
+        SetDirty();
+    }
+
+    public void SetDirty()
+    {
+        _dirty = true;
+    }
+}

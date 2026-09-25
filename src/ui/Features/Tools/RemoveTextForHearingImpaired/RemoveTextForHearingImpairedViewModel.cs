@@ -1,0 +1,560 @@
+﻿using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Interactivity;
+using Avalonia.Threading;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Nikse.SubtitleEdit.Core.Common;
+using Nikse.SubtitleEdit.Core.Dictionaries;
+using Nikse.SubtitleEdit.Core.Forms;
+using Nikse.SubtitleEdit.Features.Files.RestoreAutoBackup;
+using Nikse.SubtitleEdit.Logic;
+using Nikse.SubtitleEdit.Logic.Config;
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Timers;
+
+namespace Nikse.SubtitleEdit.Features.Tools.RemoveTextForHearingImpaired;
+
+public partial class RemoveTextForHearingImpairedViewModel : ObservableObject, IClosingCleanup
+{
+    public class LanguageItem
+    {
+        public string Code { get; }
+        public string Name { get; }
+
+        public LanguageItem(string code, string name)
+        {
+            Code = code;
+            Name = name;
+        }
+
+        public override string ToString()
+        {
+            return Name;
+        }
+
+        public static List<LanguageItem> GetAll()
+        {
+            return Iso639Dash2LanguageCode.List
+                .Select(p => new LanguageItem(p.TwoLetterCode, p.EnglishName))
+                .OrderBy(p => p.Name)
+                .ToList();
+        }
+    }
+
+    [ObservableProperty] private bool _isRemoveBracketsOn;
+    [ObservableProperty] private bool _isRemoveCurlyBracketsOn;
+    [ObservableProperty] private bool _isRemoveParenthesesOn;
+    [ObservableProperty] private bool _isRemoveCustomOn;
+    [ObservableProperty] private string _customStart;
+    [ObservableProperty] private string _customEnd;
+    [ObservableProperty] private bool _isOnlySeparateLine;
+    [ObservableProperty] private bool _isRemoveTextBeforeColonOn;
+    [ObservableProperty] private bool _isRemoveTextBeforeColonUppercaseOn;
+    [ObservableProperty] private bool _isRemoveTextBeforeColonSeparateLineOn;
+    [ObservableProperty] private bool _isRemoveTextUppercaseLineOn;
+    [ObservableProperty] private string _uppercaseWhitelist = string.Empty;
+    [ObservableProperty] private bool _isRemoveTextContainsOn;
+    [ObservableProperty] private string _textContains;
+    [ObservableProperty] private bool _isRemoveOnlyMusicSymbolsOn;
+    [ObservableProperty] private bool _isRemoveInterjectionsOn;
+    [ObservableProperty] private bool _isInterjectionsSeparateLineOn;
+    [ObservableProperty] private DisplayFile? _selectedFile;
+    [ObservableProperty] private ObservableCollection<LanguageItem> _languages;
+    [ObservableProperty] private LanguageItem? _selectedLanguage;
+    [ObservableProperty] private ObservableCollection<RemoveItem> _fixes;
+    [ObservableProperty] private RemoveItem? _selectedFix;
+    [ObservableProperty] private string _fixText;
+    [ObservableProperty] private bool _fixTextEnabled;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsSettingsMode))]
+    private bool _isApplyVisible;
+
+    public Window? Window { get; set; }
+
+    // Callers with a live target (menu, selected lines) pass an apply callback and get Apply + Done.
+    // Settings-only callers (BatchConvert) pass no callback and use the dialog as a settings editor,
+    // so they get Ok (save) + Cancel (discard).
+    public bool IsSettingsMode => !IsApplyVisible;
+
+    private Subtitle _subtitle;
+    private RemoveTextForHI? _removeTextForHiLib;
+
+    // The name list GetSettings hands out, and the subtitle it was detected from. Every preview
+    // used to re-detect the language over the whole subtitle and re-parse names.xml; the working
+    // subtitle is only replaced (never edited) between previews, so one load per instance is
+    // the same list.
+    private NameList? _nameList;
+    private Subtitle? _nameListSubtitle;
+
+    private readonly Timer _timer;
+    private volatile bool _isClosing;
+
+    // The preview pass runs the whole HI removal over every line on the UI thread, so the 500 ms
+    // timer only does it when an input changed (options, language, interjection lists).
+    private volatile bool _isDirty = true;
+
+    /// <summary>Test hook: whether the next timer tick will regenerate the preview.</summary>
+    internal bool IsPreviewDirty => _isDirty;
+    private readonly IWindowService _windowService;
+    private Action<Subtitle>? _applyCallback;
+
+    public RemoveTextForHearingImpairedViewModel(IWindowService windowService)
+    {
+        _windowService = windowService;
+
+        CustomStart = "?";
+        CustomEnd = "?";
+        TextContains = string.Empty;
+        Languages = new ObservableCollection<LanguageItem>(LanguageItem.GetAll());
+        Fixes = new ObservableCollection<RemoveItem>();
+        FixText = string.Empty;
+        _timer = new Timer(500);
+        _timer.Elapsed += TimerElapsed;
+        _subtitle = new Subtitle();
+    }
+
+    public void Initialize(Subtitle subtitle)
+    {
+        Initialize(subtitle, null);
+    }
+
+    /// <param name="applyCallback">
+    /// When set, an "Apply" button is shown that pushes the current fixes to the caller without
+    /// closing the window, so the user can run a pass, adjust options, and continue (SE4 parity, #11948).
+    /// </param>
+    public void Initialize(Subtitle subtitle, Action<Subtitle>? applyCallback)
+    {
+        _subtitle = subtitle;
+        _applyCallback = applyCallback;
+        IsApplyVisible = applyCallback != null;
+        LoadSettings();
+        _removeTextForHiLib = new RemoveTextForHI(GetSettings(_subtitle));
+    }
+
+    private void LoadSettings()
+    {
+        var settings = Se.Settings.Tools.RemoveTextForHi;
+
+        IsRemoveBracketsOn = settings.IsRemoveBracketsOn;
+        IsRemoveCurlyBracketsOn = settings.IsRemoveCurlyBracketsOn;
+        IsRemoveParenthesesOn = settings.IsRemoveParenthesesOn;
+        IsRemoveCustomOn = settings.IsRemoveCustomOn;
+        CustomStart = settings.CustomStart;
+        CustomEnd = settings.CustomEnd;
+        IsOnlySeparateLine = settings.IsOnlySeparateLine;
+
+        IsRemoveTextBeforeColonOn = settings.IsRemoveTextBeforeColonOn;
+        IsRemoveTextBeforeColonUppercaseOn = settings.IsRemoveTextBeforeColonUppercaseOn;
+        IsRemoveTextBeforeColonSeparateLineOn = settings.IsRemoveTextBeforeColonSeparateLineOn;
+
+        IsRemoveTextUppercaseLineOn = settings.IsRemoveTextUppercaseLineOn;
+        UppercaseWhitelist = settings.UppercaseWhitelist;
+
+        IsRemoveTextContainsOn = settings.IsRemoveTextContainsOn;
+        TextContains = settings.TextContains;
+
+        IsRemoveOnlyMusicSymbolsOn = settings.IsRemoveOnlyMusicSymbolsOn;
+
+        IsRemoveInterjectionsOn = settings.IsRemoveInterjectionsOn;
+        IsInterjectionsSeparateLineOn = settings.IsInterjectionsSeparateLineOn;
+    }
+
+    private void SaveSettings()
+    {
+        var settings = Se.Settings.Tools.RemoveTextForHi;
+
+        settings.IsRemoveBracketsOn = IsRemoveBracketsOn;
+        settings.IsRemoveCurlyBracketsOn = IsRemoveCurlyBracketsOn;
+        settings.IsRemoveParenthesesOn = IsRemoveParenthesesOn;
+        settings.IsRemoveCustomOn = IsRemoveCustomOn;
+        settings.CustomStart = CustomStart;
+        settings.CustomEnd = CustomEnd;
+        settings.IsOnlySeparateLine = IsOnlySeparateLine;
+
+
+        settings.IsRemoveTextBeforeColonOn = IsRemoveTextBeforeColonOn;
+        settings.IsRemoveTextBeforeColonUppercaseOn = IsRemoveTextBeforeColonUppercaseOn;
+        settings.IsRemoveTextBeforeColonSeparateLineOn = IsRemoveTextBeforeColonSeparateLineOn;
+
+        settings.IsRemoveTextUppercaseLineOn = IsRemoveTextUppercaseLineOn;
+        settings.UppercaseWhitelist = UppercaseWhitelist;
+
+        settings.IsRemoveTextContainsOn = IsRemoveTextContainsOn;
+        settings.TextContains = TextContains;
+
+        settings.IsRemoveOnlyMusicSymbolsOn = IsRemoveOnlyMusicSymbolsOn;
+
+        settings.IsRemoveInterjectionsOn = IsRemoveInterjectionsOn;
+        settings.IsInterjectionsSeparateLineOn = IsInterjectionsSeparateLineOn;
+
+        Se.SaveSettings();
+    }
+
+    // Builds a subtitle with the currently-ticked fixes applied (empty results removed).
+    private Subtitle BuildFixedSubtitle()
+    {
+        var result = new Subtitle(_subtitle, false);
+        result.Paragraphs.Clear();
+
+        // first fix wins per index, like the FirstOrDefault scan this replaces
+        var fixByIndex = new Dictionary<int, RemoveItem>(Fixes.Count);
+        foreach (var fix in Fixes)
+        {
+            fixByIndex.TryAdd(fix.Index, fix);
+        }
+
+        for (var index = 0; index < _subtitle.Paragraphs.Count; index++)
+        {
+            var p = _subtitle.Paragraphs[index];
+            if (fixByIndex.TryGetValue(index, out var fixedParagraph) && fixedParagraph.Apply)
+            {
+                p.Text = fixedParagraph.After;
+            }
+
+            result.Paragraphs.Add(p);
+        }
+
+        result.RemoveEmptyLines();
+        return result;
+    }
+
+    [RelayCommand]
+    private void Ok()
+    {
+        // Settings-only mode (no live target, e.g. BatchConvert): persist the options and close.
+        SaveSettings();
+        Window?.Close();
+    }
+
+    [RelayCommand]
+    private void Apply()
+    {
+        SaveSettings();
+
+        var applied = BuildFixedSubtitle();
+        _applyCallback?.Invoke(applied);
+
+        // Keep iterating against the applied result: re-base the working subtitle and refresh the
+        // preview so already-removed text isn't offered again (#11948). Paragraph ids must survive
+        // the re-base - GeneratePreview carries the checkbox states over by id, and removing whole
+        // lines shifts the indexes (#13839).
+        _subtitle = new Subtitle(applied, generateNewId: false);
+        _removeTextForHiLib = new RemoveTextForHI(GetSettings(_subtitle));
+        GeneratePreview();
+    }
+
+    [RelayCommand]
+    private void Cancel()
+    {
+        Window?.Close();
+    }
+
+    [RelayCommand]
+    private void Done()
+    {
+        // Edit modes (menu, selected lines): changes are already applied live via Apply, so Done
+        // just closes.
+        Window?.Close();
+    }
+
+    [RelayCommand]
+    private void SelectAllFixes()
+    {
+        foreach (var fix in Fixes)
+        {
+            fix.Apply = true;
+        }
+    }
+
+    [RelayCommand]
+    private void SelectNoFixes()
+    {
+        foreach (var fix in Fixes)
+        {
+            fix.Apply = false;
+        }
+    }
+
+    [RelayCommand]
+    private void InvertFixesSelection()
+    {
+        foreach (var fix in Fixes)
+        {
+            fix.Apply = !fix.Apply;
+        }
+    }
+
+    /// <summary>
+    /// The gestures advertised by the fixes grid context menu (#13496): tick all, untick all
+    /// and invert the "Apply" column. Called both from the window (focus sits on a button) and
+    /// from a tunneling handler on the grid, which would otherwise swallow Ctrl+A as
+    /// "select all rows".
+    /// </summary>
+    internal bool HandleFixesSelectionKey(KeyEventArgs e)
+    {
+        var isCommand = e.KeyModifiers.HasFlag(KeyModifiers.Control) || e.KeyModifiers.HasFlag(KeyModifiers.Meta);
+        if (!isCommand || e.KeyModifiers.HasFlag(KeyModifiers.Alt))
+        {
+            return false;
+        }
+
+        var isShift = e.KeyModifiers.HasFlag(KeyModifiers.Shift);
+        if (e.Key == Key.A && !isShift)
+        {
+            SelectAllFixes();
+        }
+        else if (e.Key == Key.D && !isShift)
+        {
+            SelectNoFixes();
+        }
+        else if (e.Key == Key.I && isShift)
+        {
+            InvertFixesSelection();
+        }
+        else
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    [RelayCommand]
+    private async Task EditInterjections()
+    {
+        await _windowService.ShowDialogAsync<InterjectionsWindow, InterjectionsViewModel>(Window!, vm => 
+        { 
+            vm.Initialize(SelectedLanguage); 
+        });
+
+        _isDirty = true;
+    }
+
+    protected override void OnPropertyChanged(System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        base.OnPropertyChanged(e);
+
+        // Everything but the fix list itself and its selection feeds the preview.
+        if (e.PropertyName != nameof(Fixes) &&
+            e.PropertyName != nameof(SelectedFix) &&
+            e.PropertyName != nameof(FixText) &&
+            e.PropertyName != nameof(FixTextEnabled))
+        {
+            _isDirty = true;
+        }
+    }
+
+    private void TimerElapsed(object? sender, ElapsedEventArgs e)
+    {
+        if (_isClosing)
+        {
+            return;
+        }
+
+        _timer.Stop();
+
+        if (_isDirty)
+        {
+            try
+            {
+                Dispatcher.UIThread.Invoke(GeneratePreview);
+            }
+            catch
+            {
+                return;
+            }
+        }
+
+        // Guard the restart: OnClosingCleanup may have disposed the timer while this handler ran,
+        // and Start() on a disposed timer throws ObjectDisposedException (no longer swallowed on
+        // modern .NET), crashing the app from a thread-pool thread. (#12739)
+        if (!_isClosing)
+        {
+            _timer.Start();
+        }
+    }
+
+    /// <summary>
+    /// Runs on every close path via the central hook in <see cref="UiUtil.InitializeWindow"/>.
+    /// Without it the 500 ms preview timer went on ticking for the rest of the session -
+    /// regenerating the whole fix list on the UI thread over a closed window's subtitle - and a
+    /// fresh timer was added every time the dialog was opened, from the tools menu and from batch
+    /// convert alike.
+    /// </summary>
+    public void OnClosingCleanup()
+    {
+        _isClosing = true;
+        _timer.StopAndDispose(TimerElapsed);
+    }
+
+    internal void GeneratePreview()
+    {
+        if (_removeTextForHiLib == null)
+        {
+            return;
+        }
+
+        _isDirty = false;
+        _removeTextForHiLib.Settings = GetSettings(_subtitle);
+        _removeTextForHiLib.Warnings = [];
+        
+        var interjections = Se.Settings.Tools.RemoveTextForHi.Interjections
+            .FirstOrDefault(p => p.LanguageCode == (SelectedLanguage?.Code ?? "en"));
+        var list = interjections?.Interjections ?? new List<string>();
+        var skipList = interjections?.SkipStartList ?? new List<string>();
+        _removeTextForHiLib.ReloadInterjection(list, skipList);
+
+        // first fix wins per id, like the FirstOrDefault scan this replaces
+        var oldApplyById = new Dictionary<Guid, bool>(Fixes.Count);
+        var oldApplyWithoutId = (bool?)null;
+        foreach (var fix in Fixes)
+        {
+            if (fix.Paragraph.Id is { } id)
+            {
+                oldApplyById.TryAdd(id, fix.Apply);
+            }
+            else
+            {
+                oldApplyWithoutId ??= fix.Apply;
+            }
+        }
+
+        var newFixes = new List<RemoveItem>();
+        var twoLetterIsoLanguageName = SelectedLanguage == null ? "en" : SelectedLanguage.Code;
+        for (var index = 0; index < _subtitle.Paragraphs.Count; index++)
+        {
+            var p = _subtitle.Paragraphs[index];
+            _removeTextForHiLib.WarningIndex = index - 1;
+            var newText = _removeTextForHiLib.RemoveTextFromHearImpaired(p.Text, _subtitle, index, twoLetterIsoLanguageName);
+            if (IsVisibleChange(p.Text, newText))
+            {
+                // Carry the checkbox state over by paragraph id, not by index: applying fixes that
+                // remove whole lines shifts every later index, which re-checked unchecked items (#13839).
+                var apply = true;
+                if (p.Id is { } id)
+                {
+                    if (oldApplyById.TryGetValue(id, out var oldApply))
+                    {
+                        apply = oldApply;
+                    }
+                }
+                else if (oldApplyWithoutId.HasValue)
+                {
+                    apply = oldApplyWithoutId.Value;
+                }
+
+                newFixes.Add(new RemoveItem(apply, index, p.Text, newText, p));
+            }
+        }
+
+        if (newFixes.Count == Fixes.Count)
+        {
+            var same = true;
+            for (var i = 0; i < newFixes.Count; i++)
+            {
+                if (newFixes[i].Index != Fixes[i].Index ||
+                    newFixes[i].Before != Fixes[i].Before ||
+                    newFixes[i].After != Fixes[i].After)
+                {
+                    same = false;
+                    break;
+                }
+            }
+
+            if (same)
+            {
+                return; // no changes
+            }
+        }
+
+        Fixes.Clear();
+        Fixes.AddRange(newFixes);
+    }
+
+    /// <summary>
+    /// True when the HI pass changed something the user would actually see in the fix list.
+    /// Trailing white space is ignored: RemoveTextFromHearImpaired rebuilds the text and drops
+    /// e.g. a trailing empty line, which would otherwise list a "fix" whose before and after
+    /// render identically (#13389). Line breaks are compared normalized for the same reason -
+    /// the rebuilt text always uses <see cref="Environment.NewLine"/>, so a paragraph that came
+    /// in with a foreign line break (pasted from a LF file, say) would be listed unchanged
+    /// (#13591).
+    /// </summary>
+    internal static bool IsVisibleChange(string before, string after)
+    {
+        return Flatten(before) != Flatten(after);
+
+        static string Flatten(string text) => text.NormalizeLineBreaks().Trim().RemoveChar(' ');
+    }
+
+    public RemoveTextForHISettings GetSettings(Subtitle subtitle)
+    {
+        var textContainsList = TextContains.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(p => p.Trim()).ToList();
+
+        var uppercaseWhitelist = (UppercaseWhitelist ?? string.Empty).Split([',', ';'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(p => p.Trim()).Where(p => p.Length > 0).ToList();
+
+        if (_nameList == null || !ReferenceEquals(_nameListSubtitle, subtitle))
+        {
+            _nameList = RemoveTextForHISettings.LoadNameList(subtitle);
+            _nameListSubtitle = subtitle;
+        }
+
+        var settings = new RemoveTextForHISettings(_nameList)
+        {
+            OnlyIfInSeparateLine = IsOnlySeparateLine,
+            RemoveIfAllUppercase = IsRemoveTextUppercaseLineOn,
+            UppercaseWhitelist = uppercaseWhitelist,
+            RemoveTextBeforeColon = IsRemoveTextBeforeColonOn,
+            RemoveTextBeforeColonOnlyUppercase = IsRemoveTextBeforeColonUppercaseOn,
+            ColonSeparateLine = IsRemoveTextBeforeColonSeparateLineOn,
+            RemoveWhereContains = IsRemoveTextContainsOn,
+            RemoveIfTextContains = textContainsList,
+            RemoveTextBetweenCustomTags = IsRemoveCustomOn,
+            RemoveInterjections = IsRemoveInterjectionsOn,
+            RemoveInterjectionsOnlySeparateLine = IsRemoveInterjectionsOn && IsInterjectionsSeparateLineOn,
+            RemoveTextBetweenSquares = IsRemoveBracketsOn,
+            RemoveTextBetweenBrackets = IsRemoveCurlyBracketsOn,
+            RemoveTextBetweenQuestionMarks = false,
+            RemoveTextBetweenParentheses = IsRemoveParenthesesOn,
+            RemoveIfOnlyMusicSymbols = IsRemoveOnlyMusicSymbolsOn,
+            CustomStart = CustomStart,
+            CustomEnd = CustomEnd,
+        };
+
+        return settings;
+    }
+
+    internal void OnKeyDown(KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape)
+        {
+            e.Handled = true;
+            Window?.Close();
+        }
+        else if (UiUtil.IsHelp(e))
+        {
+            e.Handled = true;
+            UiUtil.ShowHelp("features/remove-text-hi");
+        }
+        else if (HandleFixesSelectionKey(e))
+        {
+            e.Handled = true;
+        }
+    }
+
+    public void OnLoaded(RoutedEventArgs routedEventArgs)
+    {
+        var languageCode = LanguageAutoDetect.AutoDetectGoogleLanguageOrNull(_subtitle) ?? "en";
+        SelectedLanguage = Languages.FirstOrDefault(l => l.Code == languageCode) ??
+            Languages.FirstOrDefault(l => l.Code == "en");
+        
+        _timer.Start();
+    }
+}

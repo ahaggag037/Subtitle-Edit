@@ -1,0 +1,183 @@
+﻿using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
+using Avalonia.Data;
+using Avalonia.Input;
+using Avalonia.Layout;
+using Nikse.SubtitleEdit.Logic;
+using Nikse.SubtitleEdit.Logic.Config;
+
+namespace Nikse.SubtitleEdit.Features.Video.SpeechToText;
+
+public class SpeechToTextPostProcessingWindow : Window
+{
+    private readonly SpeechToTextPostProcessingViewModel _vm;
+
+    public SpeechToTextPostProcessingWindow(SpeechToTextPostProcessingViewModel vm)
+    {
+        UiUtil.InitializeWindow(this, GetType().Name);
+        Title = Se.Language.Video.AudioToText.WhisperPostProcessingTitle;
+        SizeToContent = SizeToContent.WidthAndHeight;
+        CanResize = false;
+        MinWidth = 400;
+
+        _vm = vm;
+        vm.Window = this;
+        DataContext = vm;
+
+        var labelAdjustTimings = UiUtil.MakeTextBlock(Se.Language.Video.AudioToText.AdjustTimings);
+        var checkAdjustTimings = UiUtil.MakeCheckBox(vm, nameof(SpeechToTextPostProcessingViewModel.AdjustTimings));
+
+        var labelMergeShortLines = UiUtil.MakeTextBlock(Se.Language.Video.AudioToText.MergeShortLines);
+        var checkMergeShortLines = UiUtil.MakeCheckBox(vm, nameof(SpeechToTextPostProcessingViewModel.MergeShortLines));
+
+        var labelBreakSplitLongLines = UiUtil.MakeTextBlock(Se.Language.Video.AudioToText.BreakSplitLongLines);
+        var checkBreakSplitLongLines = UiUtil.MakeCheckBox(vm, nameof(SpeechToTextPostProcessingViewModel.BreakSplitLongLines));
+
+        var labelFixShortDuration = UiUtil.MakeTextBlock(Se.Language.Video.AudioToText.FixShortDuration);
+        var checkFixShortDuration = UiUtil.MakeCheckBox(vm, nameof(SpeechToTextPostProcessingViewModel.FixShortDuration));
+
+        var labelFixCasing = UiUtil.MakeTextBlock(Se.Language.Video.AudioToText.FixCasing);
+        var checkFixCasing = UiUtil.MakeCheckBox(vm, nameof(SpeechToTextPostProcessingViewModel.FixCasing));
+
+        var labelAddPeriods = UiUtil.MakeTextBlock(Se.Language.Video.AudioToText.AddPeriods);
+        var checkAddPeriods = UiUtil.MakeCheckBox(vm, nameof(SpeechToTextPostProcessingViewModel.AddPeriods));
+
+        var labelRemoveNonSpeechLines = UiUtil.MakeTextBlock(Se.Language.Video.AudioToText.RemoveNonSpeechLines);
+        var checkRemoveNonSpeechLines = UiUtil.MakeCheckBox(vm, nameof(SpeechToTextPostProcessingViewModel.RemoveNonSpeechLines));
+        SetHint(labelRemoveNonSpeechLines, checkRemoveNonSpeechLines, Se.Language.Video.AudioToText.RemoveNonSpeechLinesHint);
+
+        var labelRemoveRepeatedLines = UiUtil.MakeTextBlock(Se.Language.Video.AudioToText.RemoveRepeatedLines);
+        var checkRemoveRepeatedLines = UiUtil.MakeCheckBox(vm, nameof(SpeechToTextPostProcessingViewModel.RemoveRepeatedLines));
+        SetHint(labelRemoveRepeatedLines, checkRemoveRepeatedLines, Se.Language.Video.AudioToText.RemoveRepeatedLinesHint);
+
+        var labelShowQualityReport = UiUtil.MakeTextBlock(Se.Language.Video.AudioToText.ShowQualityReport);
+        var checkShowQualityReport = UiUtil.MakeCheckBox(vm, nameof(SpeechToTextPostProcessingViewModel.ShowQualityReport));
+
+        var labelChangeUnderlineToColor = UiUtil.MakeTextBlock(Se.Language.Video.AudioToText.ChangeUnderlineToColor);
+        var checkChangeUnderlineToColor = UiUtil.MakeCheckBox(vm, nameof(SpeechToTextPostProcessingViewModel.ChangeUnderlineToColor));
+        var colorPickerUnderlineToColor = UiUtil.MakeColorPickerButton(_vm, nameof(_vm.ChangeUnderlineToColorColor));
+
+        var buttonPanel = UiUtil.MakeButtonBar(
+            UiUtil.MakeButton(Se.Language.General.Ok, vm.OKCommand),
+            UiUtil.MakeButton(Se.Language.General.Cancel, vm.CancelCommand)
+        );
+
+        var grid = new Grid
+        {
+            RowDefinitions =
+            {
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Star) },
+            },
+            ColumnDefinitions =
+            {
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) },
+            },
+            Margin = UiUtil.MakeWindowMargin(),
+            ColumnSpacing = 10,
+            RowSpacing = 10,
+            Width = double.NaN,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+
+        var row = 0;
+
+        grid.Add(labelAdjustTimings, row, 0);
+        grid.Add(checkAdjustTimings, row, 1);
+        row++;
+
+        grid.Add(labelMergeShortLines, row, 0);
+        grid.Add(checkMergeShortLines, row, 1);
+        row++;
+
+        grid.Add(labelBreakSplitLongLines, row, 0);
+        grid.Add(checkBreakSplitLongLines, row, 1);
+        row++;
+
+        grid.Add(labelFixShortDuration, row, 0);
+        grid.Add(checkFixShortDuration, row, 1);
+        row++;
+
+        grid.Add(labelFixCasing, row, 0);
+        grid.Add(checkFixCasing, row, 1);
+        row++;
+
+        grid.Add(labelAddPeriods, row, 0);
+        grid.Add(checkAddPeriods, row, 1);
+        row++;
+
+        grid.Add(labelRemoveNonSpeechLines, row, 0);
+        grid.Add(checkRemoveNonSpeechLines, row, 1);
+        row++;
+
+        grid.Add(labelRemoveRepeatedLines, row, 0);
+        grid.Add(checkRemoveRepeatedLines, row, 1);
+        row++;
+
+        grid.Add(labelShowQualityReport, row, 0);
+        grid.Add(checkShowQualityReport, row, 1);
+        row++;
+
+        grid.Add(labelChangeUnderlineToColor, row, 0);
+        grid.Add(checkChangeUnderlineToColor, row, 1);
+        grid.Add(colorPickerUnderlineToColor, row, 2);
+
+        // The settings scroll while the OK/Cancel bar stays pinned, so the dialog
+        // remains usable when the screen is too small for the full form (e.g. high
+        // DPI) and the window gets height-clamped to the working area.
+        var scrollViewer = new ScrollViewer
+        {
+            Content = grid,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+        };
+
+        var outerGrid = new Grid
+        {
+            RowDefinitions =
+            {
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Star) },
+                new RowDefinition { Height = new GridLength(1, GridUnitType.Auto) },
+            },
+            ColumnDefinitions =
+            {
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) },
+            },
+        };
+        buttonPanel.Margin = new Avalonia.Thickness(10, 0, 10, 10);
+        outerGrid.Add(scrollViewer, 0, 0);
+        outerGrid.Add(buttonPanel, 1, 0);
+
+        Content = outerGrid;
+
+        UiUtil.FocusOnFirstActivation(this, () => { Focus(); }); // hack to make OnKeyDown work
+    }
+
+    private static void SetHint(Control label, Control checkBox, string hint)
+    {
+        if (!Se.Settings.Appearance.ShowHints)
+        {
+            return;
+        }
+
+        ToolTip.SetTip(label, hint);
+        ToolTip.SetTip(checkBox, hint);
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        _vm.OnKeyDown(e);
+    }
+}

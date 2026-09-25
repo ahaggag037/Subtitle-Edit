@@ -1,0 +1,660 @@
+﻿using Avalonia.Controls;
+using Nikse.SubtitleEdit.Core.Common;
+using Nikse.SubtitleEdit.Features.Shared;
+using Nikse.SubtitleEdit.Features.Video.SpeechToText;
+using Nikse.SubtitleEdit.Features.Video.SpeechToText.Engines;
+using Nikse.SubtitleEdit.Features.Video.TextToSpeech.DownloadTts;
+using Nikse.SubtitleEdit.Features.Video.TextToSpeech.Engines;
+using Nikse.SubtitleEdit.Features.Video.TextToSpeech.Voices;
+using Nikse.SubtitleEdit.Logic;
+using Nikse.SubtitleEdit.Logic.Config;
+using Nikse.SubtitleEdit.Logic.Download;
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Threading.Tasks;
+
+namespace Nikse.SubtitleEdit.Features.Video.TextToSpeech;
+
+/// <summary>
+/// Shared voice-install gate for TTS engines: ensures the selected voice is present,
+/// prompting a download when it is not.
+/// </summary>
+public static class TtsVoiceInstaller
+{
+    /// <summary>
+    /// Ensures the given voice is installed, prompting a download if needed.
+    /// Returns false only when the user cancels the download.
+    /// </summary>
+    public static async Task<bool> EnsureVoiceInstalled(ITtsEngine engine, Voice voice, Window? window, IWindowService windowService)
+    {
+        if (window == null || engine.IsVoiceInstalled(voice))
+        {
+            return true;
+        }
+
+        // Only Piper has per-voice downloads; every other engine's IsVoiceInstalled is always true.
+        if (voice.EngineVoice is PiperVoice piperVoice)
+        {
+            var dlResult = await windowService.ShowDialogAsync<DownloadTtsWindow, DownloadTtsViewModel>(
+                window, vm => vm.StartDownloadPiperVoice(piperVoice));
+            if (!dlResult.OkPressed)
+            {
+                SafeDelete(Path.Combine(Piper.GetSetPiperFolder(), piperVoice.ModelShort));
+                SafeDelete(Path.Combine(Piper.GetSetPiperFolder(), piperVoice.ConfigShort));
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Ensures the CrispASR runtime that Chatterbox TTS runs on is installed and new enough.
+    /// When <paramref name="forceRedownload"/> is true the download runs even if CrispASR is
+    /// already Chatterbox-capable - used by the settings "Update CrispASR" button when a newer
+    /// release exists. Returns true when CrispASR ends up installed and Chatterbox-capable.
+    /// </summary>
+    public static Task<bool> EnsureCrispAsrForChatterbox(Window? window, IWindowService windowService, bool forceRedownload)
+        => EnsureCrispAsrAsync(window, windowService, forceRedownload,
+            engineDisplayName: "Chatterbox TTS",
+            extraCapabilityCheck: () => ChatterboxTtsCpp.IsCrispAsrChatterboxCapable(),
+            minVersionNote: "v0.6.0 or newer");
+
+    /// <summary>
+    /// Ensures the CrispASR runtime that Qwen3 TTS (CrispASR) runs on is installed.
+    /// No extra capability check (any sufficiently recent CrispASR exposes the qwen3-tts
+    /// backends), so the dialogs read with the right engine name and don't mention
+    /// Chatterbox.
+    /// </summary>
+    /// <summary>
+    /// Ensures the CrispASR runtime is installed for "Remove original speech" - its source
+    /// separation task is part of every CrispASR build SE has ever pinned.
+    /// </summary>
+    public static Task<bool> EnsureCrispAsrForSpeechRemoval(Window? window, IWindowService windowService, string featureName)
+        => EnsureCrispAsrAsync(window, windowService, forceRedownload: false,
+            engineDisplayName: featureName,
+            extraCapabilityCheck: null,
+            minVersionNote: null);
+
+    public static Task<bool> EnsureCrispAsrForQwen3(Window? window, IWindowService windowService, bool forceRedownload)
+        => EnsureCrispAsrAsync(window, windowService, forceRedownload,
+            engineDisplayName: "Qwen3 TTS (CrispASR)",
+            extraCapabilityCheck: null,
+            minVersionNote: null);
+
+    /// <summary>
+    /// Ensures the CrispASR runtime that VibeVoice (CrispASR) runs on is installed.
+    /// VibeVoice's GGUF is fetched on first server start via crispasr's own --auto-download,
+    /// so this is the only install step SE drives directly.
+    /// </summary>
+    public static Task<bool> EnsureCrispAsrForVibeVoice(Window? window, IWindowService windowService, bool forceRedownload)
+        => EnsureCrispAsrAsync(window, windowService, forceRedownload,
+            engineDisplayName: "VibeVoice (CrispASR)",
+            extraCapabilityCheck: null,
+            minVersionNote: null);
+
+    /// <summary>
+    /// Ensures the CrispASR runtime that IndexTTS (CrispASR) runs on is installed.
+    /// IndexTTS's GGUFs are fetched on first server start via crispasr's own --auto-download,
+    /// so this is the only install step SE drives directly.
+    /// </summary>
+    public static Task<bool> EnsureCrispAsrForIndexTts(Window? window, IWindowService windowService, bool forceRedownload)
+        => EnsureCrispAsrAsync(window, windowService, forceRedownload,
+            engineDisplayName: "IndexTTS (CrispASR)",
+            extraCapabilityCheck: null,
+            minVersionNote: null);
+
+    /// <summary>
+    /// Ensures the CrispASR runtime that Pocket TTS (CrispASR) runs on is installed.
+    /// The pocket-tts backend is older, but the per-language backends and model routing SE
+    /// relies on (pocket-tts-de/es/it/pt/fr) ship in CrispASR v0.8.31+.
+    /// </summary>
+    public static Task<bool> EnsureCrispAsrForPocketTts(Window? window, IWindowService windowService, bool forceRedownload)
+        => EnsureCrispAsrAsync(window, windowService, forceRedownload,
+            engineDisplayName: "Pocket TTS (CrispASR)",
+            extraCapabilityCheck: null,
+            minVersionNote: "v0.8.31 or newer");
+
+    /// <summary>
+    /// Ensures the CrispASR runtime that Supertonic (CrispASR) runs on is installed.
+    /// The supertonic backend ships in CrispASR v0.8.33 and newer; the version note names that
+    /// floor because older builds have no supertonic backend at all and abort on the unknown
+    /// --backend value.
+    /// </summary>
+    public static Task<bool> EnsureCrispAsrForSupertonic(Window? window, IWindowService windowService, bool forceRedownload)
+        => EnsureCrispAsrAsync(window, windowService, forceRedownload,
+            engineDisplayName: "Supertonic (CrispASR)",
+            extraCapabilityCheck: null,
+            minVersionNote: "v0.8.33 or newer");
+
+    /// <summary>
+    /// Ensures the CrispASR runtime that Zonos TTS (CrispASR) runs on is installed.
+    /// The zonos-tts backend's GGUFs (transformer + DAC codec) are staged into SE's
+    /// CrispAsr/models folder by
+    /// <see cref="Nikse.SubtitleEdit.Logic.Download.ZonosTtsCrispAsrDownloadService"/> with
+    /// hash verification before first synth.
+    /// </summary>
+    public static Task<bool> EnsureCrispAsrForZonos(Window? window, IWindowService windowService, bool forceRedownload)
+        => EnsureCrispAsrAsync(window, windowService, forceRedownload,
+            engineDisplayName: "Zonos TTS (CrispASR)",
+            extraCapabilityCheck: null,
+            minVersionNote: null);
+
+    /// <summary>
+    /// Ensures the CrispASR runtime that CosyVoice3 (CrispASR) runs on is installed.
+    /// The cosyvoice3-tts backend ships in CrispASR v0.6.12+; every required GGUF (LLM + flow
+    /// + hift + s3tok + campplus + voice-bank) is staged into SE's CrispAsr/models folder by
+    /// <see cref="Nikse.SubtitleEdit.Logic.Download.CosyVoice3CrispAsrDownloadService"/> with
+    /// hash verification before first synth.
+    /// </summary>
+    public static Task<bool> EnsureCrispAsrForCosyVoice3(Window? window, IWindowService windowService, bool forceRedownload)
+        => EnsureCrispAsrAsync(window, windowService, forceRedownload,
+            engineDisplayName: "CosyVoice3 (CrispASR)",
+            extraCapabilityCheck: null,
+            minVersionNote: "v0.6.12 or newer");
+
+    /// <summary>
+    /// Ensures the CrispASR runtime that F5-TTS (CrispASR) runs on is installed.
+    /// The f5-tts backend ships in CrispASR v0.6.12+.
+    /// </summary>
+    public static Task<bool> EnsureCrispAsrForF5Tts(Window? window, IWindowService windowService, bool forceRedownload)
+        => EnsureCrispAsrAsync(window, windowService, forceRedownload,
+            engineDisplayName: "F5-TTS (CrispASR)",
+            extraCapabilityCheck: null,
+            minVersionNote: "v0.6.12 or newer");
+
+    /// <summary>
+    /// Ensures the CrispASR runtime that VoxCPM2 (CrispASR) runs on is installed.
+    /// The voxcpm2-tts backend ships in CrispASR v0.7.0+.
+    /// </summary>
+    public static Task<bool> EnsureCrispAsrForVoxCPM2(Window? window, IWindowService windowService, bool forceRedownload)
+        => EnsureCrispAsrAsync(window, windowService, forceRedownload,
+            engineDisplayName: "VoxCPM2 (CrispASR)",
+            extraCapabilityCheck: null,
+            minVersionNote: "v0.7.0 or newer");
+
+    /// <summary>
+    /// Ensures the CrispASR runtime that OmniVoice TTS (CrispASR) runs on is installed.
+    /// The omnivoice backend itself has shipped since well before the pinned build, but the
+    /// per-request target language SE sends is only honoured from v0.8.26 — on anything older the
+    /// field is parsed and ignored (#13273) — so the note names that floor.
+    /// </summary>
+    public static Task<bool> EnsureCrispAsrForOmniVoice(Window? window, IWindowService windowService, bool forceRedownload)
+        => EnsureCrispAsrAsync(window, windowService, forceRedownload,
+            engineDisplayName: "OmniVoice TTS (CrispASR)",
+            extraCapabilityCheck: null,
+            minVersionNote: "v0.8.26 or newer");
+
+    /// <summary>
+    /// Ensures the CrispASR runtime that MOSS-TTS (CrispASR) runs on is installed.
+    /// The moss-tts backend ships in CrispASR v0.8.13 and newer (SE pins v0.8.37).
+    /// </summary>
+    public static Task<bool> EnsureCrispAsrForMossTts(Window? window, IWindowService windowService, bool forceRedownload)
+        => EnsureCrispAsrAsync(window, windowService, forceRedownload,
+            engineDisplayName: "MOSS-TTS (CrispASR)",
+            extraCapabilityCheck: null,
+            minVersionNote: "v0.8.13 or newer");
+
+    /// <summary>
+    /// Ensures the CrispASR runtime that dots.tts (CrispASR) runs on is installed.
+    /// The dots-tts backend ships in CrispASR v0.8.25 and newer (SE pins v0.8.37); the version
+    /// note names that floor because older builds have no dots-tts backend at all and abort on
+    /// the unknown --backend value.
+    /// </summary>
+    public static Task<bool> EnsureCrispAsrForDotsTts(Window? window, IWindowService windowService, bool forceRedownload)
+        => EnsureCrispAsrAsync(window, windowService, forceRedownload,
+            engineDisplayName: "dots.tts (CrispASR)",
+            extraCapabilityCheck: null,
+            minVersionNote: "v0.8.25 or newer");
+
+    /// <summary>
+    /// Ensures the CrispASR runtime that Confucius4-TTS (CrispASR) runs on is installed.
+    /// The confucius4-tts backend ships in CrispASR v0.8.30 and newer; the version note names
+    /// that floor because older builds have no confucius4-tts backend at all and abort on the
+    /// unknown --backend value.
+    /// </summary>
+    public static Task<bool> EnsureCrispAsrForConfucius4Tts(Window? window, IWindowService windowService, bool forceRedownload)
+        => EnsureCrispAsrAsync(window, windowService, forceRedownload,
+            engineDisplayName: "Confucius4-TTS (CrispASR)",
+            extraCapabilityCheck: null,
+            minVersionNote: "v0.8.30 or newer");
+
+    /// <summary>
+    /// Shared CrispASR install/update flow used by all TTS engines that sit on the
+    /// CrispASR runtime. Prompts refer to <paramref name="engineDisplayName"/> so users
+    /// see the right engine name. <paramref name="extraCapabilityCheck"/> lets the caller
+    /// require a backend-specific minimum (Chatterbox needs the chatterbox backend to be
+    /// present in the binary, for example); returning false there triggers a re-download
+    /// even when CrispASR itself looks up to date.
+    /// </summary>
+    /// <summary>
+    /// Ensures the shared audio.cpp runtime is installed — the same binaries back IndexTTS
+    /// 2.5, Higgs Audio v3 and Fish Audio S2 Pro, so whichever engine asks first downloads
+    /// for all of them. Unlike the CrispASR engines, these binaries are built by SubtitleEdit
+    /// itself (upstream ships Windows-only prebuilts), and the archive is per backend: Metal
+    /// on Apple Silicon, and CPU / Vulkan / CUDA on Windows and Linux x64.
+    /// </summary>
+    /// <param name="engineDisplayName">The engine that asked, for the prompts ("IndexTTS 2.5").</param>
+    /// <param name="requiredFamily">
+    /// The audio.cpp model family that engine needs (its <c>FamilyName</c>). An installed runtime
+    /// that predates the family is not "installed" for this engine: the user is asked to update
+    /// it, since the old binary would only fail later with "unsupported model family hint".
+    /// </param>
+    public static async Task<bool> EnsureAudioCppRuntime(Window? window, IWindowService windowService, bool forceRedownload, string engineDisplayName, string requiredFamily)
+    {
+        if (window == null)
+        {
+            return false;
+        }
+
+        var isInstalled = File.Exists(AudioCppRuntime.GetServerExecutable());
+        var isCapable = isInstalled && AudioCppRuntime.SupportsFamily(requiredFamily);
+        if (!forceRedownload && isCapable)
+        {
+            return true;
+        }
+
+        // Installed but built before this engine's family existed: confirm the update and keep
+        // the backend the user picked the first time — no reason to ask CPU/Vulkan/CUDA again.
+        var isUpdateRequired = isInstalled && !isCapable && !forceRedownload;
+        var savedBackend = Se.Settings.Video.TextToSpeech.IndexTts25AudioCppBackend;
+        if (isUpdateRequired)
+        {
+            var updateAnswer = await MessageBox.Show(
+                window,
+                "audio.cpp update required",
+                $"{Environment.NewLine}\"{engineDisplayName}\" needs a newer audio.cpp runtime than the one installed. Re-download it now?",
+                MessageBoxButtons.YesNoCancel,
+                MessageBoxIcon.Question);
+
+            if (updateAnswer != MessageBoxResult.Yes)
+            {
+                return false;
+            }
+        }
+
+        string backend;
+        if (Configuration.IsRunningOnMac)
+        {
+            if (RuntimeInformation.ProcessArchitecture != Architecture.Arm64)
+            {
+                await MessageBox.Show(
+                    window,
+                    engineDisplayName,
+                    $"{Environment.NewLine}\"{engineDisplayName}\" (audio.cpp) requires an Apple Silicon Mac.",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return false;
+            }
+
+            var answer = isUpdateRequired ? MessageBoxResult.Yes : await MessageBox.Show(
+                window,
+                "Download audio.cpp?",
+                $"{Environment.NewLine}\"{engineDisplayName}\" runs through the audio.cpp runtime. Download and install now?",
+                MessageBoxButtons.YesNoCancel,
+                MessageBoxIcon.Question);
+
+            if (answer != MessageBoxResult.Yes)
+            {
+                return false;
+            }
+
+            backend = IndexTts25AudioCppDownloadService.BackendMetal;
+        }
+        else if (Configuration.IsRunningOnWindows || Configuration.IsRunningOnLinux)
+        {
+            if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            {
+                await MessageBox.Show(
+                    window,
+                    engineDisplayName,
+                    $"{Environment.NewLine}\"{engineDisplayName}\" (audio.cpp) is only built for x86-64 on Windows and Linux.",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return false;
+            }
+
+            var variantAnswer = isUpdateRequired && !string.IsNullOrEmpty(savedBackend)
+                ? MessageBoxResult.None
+                : await MessageBox.Show(
+                window,
+                "Download audio.cpp?",
+                $"{Environment.NewLine}\"{engineDisplayName}\" runs through the audio.cpp runtime. Select a build to download:",
+                MessageBoxButtons.Cancel,
+                MessageBoxIcon.Question,
+                "CPU",
+                "Vulkan",
+                "CUDA");
+
+            if (isUpdateRequired && !string.IsNullOrEmpty(savedBackend))
+            {
+                backend = savedBackend;
+            }
+            else if (variantAnswer == MessageBoxResult.None || variantAnswer == MessageBoxResult.Cancel)
+            {
+                return false;
+            }
+            else
+            {
+                backend = variantAnswer switch
+                {
+                    MessageBoxResult.Custom2 => IndexTts25AudioCppDownloadService.BackendVulkan,
+                    MessageBoxResult.Custom3 => IndexTts25AudioCppDownloadService.BackendCuda,
+                    _ => IndexTts25AudioCppDownloadService.BackendCpu,
+                };
+            }
+
+            // The GPU builds import their runtime at load time, so a missing driver is not a
+            // slow fallback — the process dies in the loader before printing anything.
+            if (backend == IndexTts25AudioCppDownloadService.BackendVulkan && !VulkanHelper.IsInstalled())
+            {
+                var vulkanAnswer = await MessageBox.Show(
+                    window,
+                    "Vulkan driver may be required",
+                    $"The Vulkan build needs a Vulkan-capable GPU driver.{Environment.NewLine}{Environment.NewLine}Without it audio.cpp cannot start at all. Pick the CPU build instead if you are unsure.{Environment.NewLine}{Environment.NewLine}Continue with Vulkan download?",
+                    MessageBoxButtons.YesNoCancel,
+                    MessageBoxIcon.Question);
+
+                if (vulkanAnswer != MessageBoxResult.Yes)
+                {
+                    return false;
+                }
+            }
+        }
+        else
+        {
+            return false;
+        }
+
+        // The four audio.cpp engines share this binary. A server started from the old build
+        // must go before the archive is extracted: on Windows the running exe cannot be
+        // overwritten at all, and elsewhere the stale process would keep answering requests
+        // (and reject any model family the new build added) until Subtitle Edit restarts.
+        IndexTts25AudioCpp.StopServer();
+        HiggsTtsAudioCpp.StopServer();
+        FishTtsAudioCpp.StopServer();
+        FireRedTts3AudioCpp.StopServer();
+
+        var dlResult = await windowService.ShowDialogAsync<DownloadTtsWindow, DownloadTtsViewModel>(
+            window, vm => vm.StartDownloadIndexTts25AudioCppEngine(backend));
+
+        if (!dlResult.OkPressed || !File.Exists(AudioCppRuntime.GetServerExecutable()))
+        {
+            return false;
+        }
+
+        // Remember which archive is on disk: the engine passes this straight to audio.cpp's
+        // server config as the ggml backend.
+        Se.Settings.Video.TextToSpeech.IndexTts25AudioCppBackend = backend;
+        return true;
+    }
+
+    private static async Task<bool> EnsureCrispAsrAsync(
+        Window? window,
+        IWindowService windowService,
+        bool forceRedownload,
+        string engineDisplayName,
+        Func<bool>? extraCapabilityCheck,
+        string? minVersionNote)
+    {
+        if (window == null)
+        {
+            return false;
+        }
+
+        var isInstalled = File.Exists(ChatterboxTtsCpp.GetCrispAsrExecutable());
+        // Off the UI thread: the capability check SHA-256s the whole crispasr executable
+        // (hundreds of MB in the GPU builds), which visibly stalled the window on click.
+        var isCapable = isInstalled
+            && (extraCapabilityCheck == null || await Task.Run(extraCapabilityCheck));
+        if (!forceRedownload && isInstalled && isCapable)
+        {
+            return true;
+        }
+
+        var crispAsrEngine = (ISpeechToTextEngine)new CrispAsrCohere();
+        string crispVariant;
+
+        if (isInstalled)
+        {
+            // Already installed - re-download with the variant the user originally picked.
+            var folder = crispAsrEngine.GetAndCreateWhisperFolder();
+            if (Configuration.IsRunningOnWindows)
+            {
+                crispVariant = DownloadHashManager.DetectCrispAsrWindowsVariant(folder) ?? "vulkan";
+            }
+            else if (Configuration.IsRunningOnLinux && RuntimeInformation.ProcessArchitecture != Architecture.Arm64)
+            {
+                // Empty means the default CPU build; the GPU builds ("cuda" / "cuda13" /
+                // "vulkan" / "hip") are only detectable via sidecar or executable hash.
+                crispVariant = DownloadHashManager.DetectCrispAsrLinuxVariant(folder) ?? string.Empty;
+            }
+            else
+            {
+                crispVariant = string.Empty; // ignored on macOS / Linux ARM64
+            }
+
+            var versionRequirement = !string.IsNullOrEmpty(minVersionNote)
+                ? $" needs CrispASR {minVersionNote}"
+                : " requires a newer CrispASR runtime";
+
+            var answer = await MessageBox.Show(
+                window,
+                isCapable ? "Update CrispASR" : "CrispASR update required",
+                isCapable
+                    ? $"{Environment.NewLine}A newer CrispASR runtime is available. Re-download it now?"
+                    : $"{Environment.NewLine}\"{engineDisplayName}\"{versionRequirement}. Re-download now?",
+                MessageBoxButtons.YesNoCancel,
+                MessageBoxIcon.Question);
+
+            if (answer != MessageBoxResult.Yes)
+            {
+                return false;
+            }
+        }
+        else if (Configuration.IsRunningOnWindows)
+        {
+            var variantAnswer = await MessageBox.Show(
+                window,
+                "Download CrispASR?",
+                $"{Environment.NewLine}\"{engineDisplayName}\" runs through the CrispASR runtime. Select a build to download:",
+                MessageBoxButtons.Cancel,
+                MessageBoxIcon.Question,
+                "CPU",
+                "Vulkan",
+                "CUDA");
+
+            if (variantAnswer == MessageBoxResult.None || variantAnswer == MessageBoxResult.Cancel)
+            {
+                return false;
+            }
+
+            crispVariant = variantAnswer switch
+            {
+                MessageBoxResult.Custom1 => "cpu",
+                MessageBoxResult.Custom3 => "cuda",
+                _ => "vulkan",
+            };
+
+            if (crispVariant == "cuda")
+            {
+                // Upstream added a Windows CUDA 13 build alongside the CUDA 12 one in v0.8.31, so
+                // Windows gets the same follow-up Linux has (#14343) - without it a fresh install
+                // from here can only ever land on CUDA 12.
+                var cudaAnswer = await PromptCrispAsrCudaVersionAsync(window);
+                if (cudaAnswer == null)
+                {
+                    return false;
+                }
+
+                crispVariant = cudaAnswer;
+            }
+
+            if (crispVariant == "cpu")
+            {
+                var cpuAnswer = await PromptCrispAsrCpuFlavorAsync(window);
+                if (cpuAnswer == null)
+                {
+                    return false;
+                }
+                crispVariant = cpuAnswer;
+            }
+
+            if (crispVariant == "vulkan" && !VulkanHelper.IsInstalled())
+            {
+                var vulkanAnswer = await MessageBox.Show(
+                    window,
+                    "Vulkan SDK may be required",
+                    $"The Vulkan version requires the Vulkan SDK to be installed.{Environment.NewLine}{Environment.NewLine}You can download it from:{Environment.NewLine}https://vulkan.lunarg.com/sdk/home{Environment.NewLine}{Environment.NewLine}Continue with Vulkan download?",
+                    MessageBoxButtons.YesNoCancel,
+                    MessageBoxIcon.Question);
+
+                if (vulkanAnswer == MessageBoxResult.No)
+                {
+                    UiUtil.OpenUrl("https://vulkan.lunarg.com/sdk/home");
+                    return false;
+                }
+
+                if (vulkanAnswer != MessageBoxResult.Yes)
+                {
+                    return false;
+                }
+            }
+        }
+        else if (Configuration.IsRunningOnLinux && RuntimeInformation.ProcessArchitecture != Architecture.Arm64)
+        {
+            var linuxAnswer = await PromptCrispAsrLinuxVariantAsync(window, engineDisplayName);
+            if (linuxAnswer == null)
+            {
+                return false;
+            }
+
+            crispVariant = linuxAnswer;
+        }
+        else
+        {
+            var answer = await MessageBox.Show(
+                window,
+                "Download CrispASR?",
+                $"{Environment.NewLine}\"{engineDisplayName}\" runs through the CrispASR runtime. Download and install now?",
+                MessageBoxButtons.YesNoCancel,
+                MessageBoxIcon.Question);
+
+            if (answer != MessageBoxResult.Yes)
+            {
+                return false;
+            }
+
+            crispVariant = string.Empty; // ignored on macOS / Linux ARM64
+        }
+
+        var dlVm = await windowService.ShowDialogAsync<DownloadSpeechToTextEngineWindow, DownloadSpeechToTextEngineViewModel>(
+            window, viewModel =>
+            {
+                viewModel.Engine = crispAsrEngine;
+                viewModel.CrispAsrWindowsVariant = crispVariant;
+                viewModel.StartDownload();
+            });
+
+        if (!dlVm.OkPressed)
+        {
+            return false;
+        }
+
+        return File.Exists(ChatterboxTtsCpp.GetCrispAsrExecutable())
+               && (extraCapabilityCheck?.Invoke() ?? true);
+    }
+
+    /// <summary>
+    /// Follow-up prompt after the user picks "CPU" in the CrispASR variant selector.
+    /// Returns "cpu" (modern, recommended), "cpu-legacy" (compatibility build for CPUs without AVX2),
+    /// or null when the user cancels.
+    /// </summary>
+    private static async Task<string?> PromptCrispAsrCpuFlavorAsync(Window window)
+    {
+        var cpuAnswer = await MessageBox.Show(
+            window,
+            "CrispASR CPU build",
+            $"{Environment.NewLine}Standard is recommended for most machines.{Environment.NewLine}{Environment.NewLine}Legacy is a fallback for older CPUs without AVX2 support.",
+            MessageBoxButtons.Cancel,
+            MessageBoxIcon.Question,
+            "Standard",
+            "Legacy");
+
+        return cpuAnswer switch
+        {
+            MessageBoxResult.Custom1 => "cpu",
+            MessageBoxResult.Custom2 => "cpu-legacy",
+            _ => null,
+        };
+    }
+
+    /// <summary>
+    /// Linux x86_64 build prompt: CPU, Vulkan (any GPU), CUDA (NVIDIA) or ROCm (AMD).
+    /// Returns "vulkan" / "cuda" / "cuda13" / "hip", empty string for the default CPU build,
+    /// or null when the user cancels.
+    /// </summary>
+    private static async Task<string?> PromptCrispAsrLinuxVariantAsync(Window window, string engineDisplayName)
+    {
+        var answer = await MessageBox.Show(
+            window,
+            "Download CrispASR?",
+            $"{Environment.NewLine}\"{engineDisplayName}\" runs through the CrispASR runtime. Select a build to download:",
+            MessageBoxButtons.Cancel,
+            MessageBoxIcon.Question,
+            "CPU",
+            "Vulkan",
+            "CUDA",
+            "ROCm");
+
+        if (answer == MessageBoxResult.Custom3)
+        {
+            return await PromptCrispAsrCudaVersionAsync(window);
+        }
+
+        return answer switch
+        {
+            MessageBoxResult.Custom1 => string.Empty,
+            MessageBoxResult.Custom2 => "vulkan",
+            MessageBoxResult.Custom4 => "hip",
+            _ => null,
+        };
+    }
+
+    /// <summary>
+    /// Follow-up prompt after the user picks "CUDA" in the CrispASR variant selector, on both
+    /// Windows and Linux - upstream ships a CUDA 12 and a CUDA 13 build for each.
+    /// Returns "cuda" (CUDA 12 build) or "cuda13", or null when the user cancels.
+    /// </summary>
+    private static async Task<string?> PromptCrispAsrCudaVersionAsync(Window window)
+    {
+        var cudaAnswer = await MessageBox.Show(
+            window,
+            "CrispASR CUDA build",
+            $"{Environment.NewLine}CUDA 12 works with most current NVIDIA drivers.{Environment.NewLine}{Environment.NewLine}Pick CUDA 13 only if your driver stack is built for CUDA 13.",
+            MessageBoxButtons.Cancel,
+            MessageBoxIcon.Question,
+            "CUDA 12",
+            "CUDA 13");
+
+        return cudaAnswer switch
+        {
+            MessageBoxResult.Custom1 => "cuda",
+            MessageBoxResult.Custom2 => "cuda13",
+            _ => null,
+        };
+    }
+
+    private static void SafeDelete(string fileName)
+    {
+        try
+        {
+            File.Delete(fileName);
+        }
+        catch
+        {
+            // ignore
+        }
+    }
+}

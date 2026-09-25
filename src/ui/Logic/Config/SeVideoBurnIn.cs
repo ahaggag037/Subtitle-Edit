@@ -1,0 +1,92 @@
+﻿using Nikse.SubtitleEdit.Core.Common;
+using Nikse.SubtitleEdit.UiLogic.Export;
+using System;
+using SkiaSharp;
+
+namespace Nikse.SubtitleEdit.Logic.Config;
+
+public class SeVideoBurnIn
+{
+    public string FontName { get; set; }
+    public bool FontBold { get; set; }
+    public decimal OutlineWidth { get; set; }
+    public decimal ShadowWidth { get; set; }
+    public double FontFactor { get; set; }
+    public string Encoding { get; set; }
+    public string Preset { get; set; }
+    public string PixelFormat { get; set; }
+    public string Crf { get; set; }
+    public string Tune { get; set; }
+    public string AudioEncoding { get; set; }
+    public bool AudioForceStereo { get; set; }
+    public string AudioSampleRate { get; set; }
+    public string AudioBitRate { get; set; }
+    public bool TargetFileSize { get; set; }
+    public int TargetFileSizeMb { get; set; }
+    public bool TargetFileSizeMatchSource { get; set; }
+    public int NonAssaBoxType { get; set; }
+    public bool NonAssaBox { get; set; }
+    public string GenTransparentVideoExtension { get; set; }
+    public string NonAssaBoxColor { get; set; }
+    public string NonAssaTextColor { get; set; }
+    public string NonAssaShadowColor { get; set; }
+    public string NonAssaOutlineColor { get; set; }
+    public string NonAssaAlignment { get; set; }
+    public bool NonAssaFixRtlUnicode { get; set; }
+    public decimal NonAssaSpacing { get; set; }
+    public decimal NonAssaMarginVertical { get; set; }
+    public decimal NonAssaMarginHorizontal { get; set; }
+    public string EmbedOutputExt { get; set; }
+    public string EmbedOutputSuffix { get; set; }
+    public string EmbedOutputReplace { get; set; }
+    public bool UseOutputFolder { get; set; }
+    public string OutputFolder { get; set; }
+    public string BurnInSuffix { get; set; }
+    public bool UseSourceResolution { get; set; }
+    public Export3DMode Mode3D { get; set; }
+    public int Depth3D { get; set; }
+    public string OutputExtension { get; set; }
+    public string Effects { get; set; }
+
+    // On macOS the hardware encoder is always present, so default to it there.
+    public static string DefaultEncoding => Configuration.IsRunningOnMac ? "h264_videotoolbox" : "libx264";
+
+    public SeVideoBurnIn()
+    {
+        FontName = "Arial";
+        PixelFormat = string.Empty;
+        EmbedOutputExt = ".mkv";
+        OutputFolder = string.Empty;
+        FontFactor = 0.52;
+        Encoding = DefaultEncoding;
+        Preset = "medium";
+        // 23 is the right default for libx264 CRF (0-51, lower is better), but the macOS default
+        // encoder is VideoToolbox, whose quality scale is 1-100 with higher being better - and on
+        // Intel Macs "-q:v" fails outright. Its quality stays unset so ffmpeg picks a bitrate.
+        Crf = DefaultEncoding == "libx264" ? "23" : string.Empty;
+        // Only the NVIDIA encoders have a tune in the burn-in window, and their default is
+        // ffmpeg's own (high quality) - the old "film" here was an x264 value nothing ever read.
+        Tune = string.Empty;
+        AudioEncoding = "copy";
+        AudioForceStereo = true;
+        AudioSampleRate = "48000";
+        AudioBitRate = "128k";
+        TargetFileSizeMb = 100;
+        TargetFileSizeMatchSource = true;
+        FontBold = true;
+        OutlineWidth = 6;
+        ShadowWidth = 3;
+        NonAssaBox = true;
+        NonAssaBoxColor = SKColors.Black.ToHex();
+        NonAssaTextColor = SKColors.White.ToHex();
+        NonAssaShadowColor = SKColors.Black.ToHex();
+        NonAssaOutlineColor = SKColors.Black.ToHex();
+        EmbedOutputSuffix = "embed";
+        EmbedOutputReplace = "embed" + Environment.NewLine + "SoftSub" + Environment.NewLine + "SoftSubbed";
+        BurnInSuffix = "_new";
+        GenTransparentVideoExtension = ".mkv";
+        OutputExtension = ".mkv";
+        NonAssaAlignment = "2";
+        Effects = string.Empty;
+    }
+}

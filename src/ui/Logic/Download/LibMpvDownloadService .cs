@@ -1,0 +1,71 @@
+﻿using System;
+using System.IO;
+using System.Net.Http;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Nikse.SubtitleEdit.Logic.Download;
+
+public interface ILibMpvDownloadService
+{
+    Task DownloadLibMpv(string destinationFileName, IProgress<float>? progress, CancellationToken cancellationToken);
+
+    Task DownloadLibMpv(Stream stream, IProgress<float>? progress, CancellationToken cancellationToken);
+}
+
+public class LibMpvDownloadService : ILibMpvDownloadService
+{
+    private readonly HttpClient _httpClient;
+    // The "b" repack bundles the Khronos Vulkan loader: this libmpv has a load-time
+    // import of vulkan-1.dll, which GPU drivers older than Vulkan never installed (#13856).
+    private const string WindowsUrl = "https://github.com/SubtitleEdit/support-files/releases/download/libmpv-2026-08-14b/libmpv2-win64.zip";
+    private const string WindowsUrlArm = "https://github.com/SubtitleEdit/support-files/releases/download/libmpv-2026-08-14b/libmpv2-win-arm64.zip";
+    private const string MacUrl = "";
+    private const string MacUrlArm = "";
+
+    public LibMpvDownloadService(HttpClient httpClient)
+    {
+        _httpClient = httpClient;
+    }
+
+    private static string GetUrl()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            // A native ARM64 process cannot load an x64 DLL, so the download
+            // must match the process architecture (issue #12087).
+            return RuntimeInformation.ProcessArchitecture == Architecture.Arm64
+                ? WindowsUrlArm
+                : WindowsUrl;
+        }
+
+        throw new PlatformNotSupportedException("Unsupported platform for libmpv download." + Environment.NewLine +
+            RuntimeInformation.OSDescription);
+
+        //if (OperatingSystem.IsMacOS())
+        //{
+        //    switch (RuntimeInformation.ProcessArchitecture)
+        //    {
+        //        case Architecture.Arm64:
+        //            return MacUrlArm; // e.g., for M1, M2, M3, M4 chips
+        //        case Architecture.X64:
+        //            return MacUrl;
+        //        default:
+        //            throw new PlatformNotSupportedException("Unsupported macOS architecture.");
+        //    }
+        //}
+
+        //throw new PlatformNotSupportedException();
+    }
+
+    public async Task DownloadLibMpv(string destinationFileName, IProgress<float>? progress, CancellationToken cancellationToken)
+    {
+        await DownloadHelper.DownloadFileAsync(_httpClient, GetUrl(), destinationFileName, progress, cancellationToken);
+    }
+
+    public async Task DownloadLibMpv(Stream stream, IProgress<float>? progress, CancellationToken cancellationToken)
+    {
+        await DownloadHelper.DownloadFileAsync(_httpClient, GetUrl(), stream, progress, cancellationToken);
+    }
+}

@@ -1,0 +1,35 @@
+﻿namespace Nikse.SubtitleEdit.Logic.Config.Language.Edit;
+
+public class LanguageEditFind
+{
+    public string SearchTextWatermark { get; set; }
+    public string WholeWord { get; set; }
+    public string FindPrevious { get; set; }
+    public string FindNext { get; set; }
+    public string ReplaceAndFindNext { get; set; }
+    public string ReplaceAll { get; set; }
+    public string ReplaceTextWatermark { get; set; }
+    public string ReplaceIn { get; set; }
+    public string ReplaceInTextAndOriginal { get; set; }
+    public string ReplaceInTextOnly { get; set; }
+    public string ReplaceInOriginalOnly { get; set; }
+    public string ReplacedOneOccurrence { get; set; }
+    public string ReplacedXOccurrences { get; set; }
+
+    public LanguageEditFind()
+    {
+        SearchTextWatermark = "Search text...";
+        ReplaceTextWatermark = "Replace with...";
+        WholeWord = "Whole word";
+        FindPrevious = "Find _previous";
+        FindNext = "_Find next";
+        ReplaceAndFindNext = "_Replace & find next";
+        ReplaceAll = "Replace _all";
+        ReplaceIn = "Replace/search in";
+        ReplaceInTextAndOriginal = "Text and original text";
+        ReplaceInTextOnly = "Text only";
+        ReplaceInOriginalOnly = "Original text only";
+        ReplacedOneOccurrence = "Replaced one occurrence";
+        ReplacedXOccurrences = "Replaced {0} occurrences";
+    }
+}

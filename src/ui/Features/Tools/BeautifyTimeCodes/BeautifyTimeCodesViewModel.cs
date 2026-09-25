@@ -1,0 +1,928 @@
+﻿using Avalonia.Controls;
+using Avalonia.Input;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Nikse.SubtitleEdit.Core.Common;
+using Nikse.SubtitleEdit.Core.SubtitleFormats;
+using Nikse.SubtitleEdit.Features.Main;
+using Nikse.SubtitleEdit.Features.Tools.BeautifyTimeCodes.Profile;
+using Nikse.SubtitleEdit.Logic;
+using Nikse.SubtitleEdit.Logic.Config;
+using Nikse.SubtitleEdit.Logic.Media;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Nikse.SubtitleEdit.UiLogic.Media;
+
+namespace Nikse.SubtitleEdit.Features.Tools.BeautifyTimeCodes;
+
+public partial class BeautifyTimeCodesViewModel : ObservableObject, IDisposable
+{
+    public Window? Window { get; set; }
+    public bool OkPressed { get; private set; }
+
+    private readonly System.Timers.Timer _timerUpdatePreview;
+    private UiTickPump? _positionTimer; // posted ticks, not a DispatcherTimer - see UiTickPump
+    private volatile bool _dirty;
+    private volatile bool _updateInProgress;
+    private readonly Lock _timerLock = new Lock();
+    private readonly List<SubtitleLineViewModel> _allSubtitles;
+    private readonly List<SubtitleLineViewModel> _originalSubtitles;
+    private readonly List<SubtitleLineViewModel> _beautifiedSubtitles;
+    private List<double> _shotChanges;
+    private List<double> _timeCodes;
+
+    /// <summary>Shared "none" list - the beautifier only reads it, and the preview re-runs often.</summary>
+    private static readonly List<double> NoTimeCodes = new List<double>();
+    private double _frameRate = 25.0;
+    private double _videoDurationSeconds;
+    private string _videoFileName = string.Empty;
+    private CancellationTokenSource? _extractCancellation;
+    private volatile bool _disposed;
+
+    private readonly IWindowService _windowService;
+
+    /// <summary>Indices into _beautifiedSubtitles whose start or end differs from the original.</summary>
+    private readonly List<int> _changedIndices = new();
+    private int _currentChangeIndex = -1;
+
+    [ObservableProperty] private Controls.AudioVisualizerControl.AudioVisualizer? _audioVisualizerOriginal;
+    [ObservableProperty] private Controls.AudioVisualizerControl.AudioVisualizer? _audioVisualizerBeautified;
+
+    [ObservableProperty] private string _statsLine = string.Empty;
+    [ObservableProperty] private string _changePositionLabel = string.Empty;
+    [ObservableProperty] private string _changeDetail = string.Empty;
+    [ObservableProperty] private string _changeNotes = string.Empty;
+    [ObservableProperty] private bool _hasChanges;
+    [ObservableProperty] private bool _canGoPrevious;
+    [ObservableProperty] private bool _canGoNext;
+
+    [ObservableProperty] private bool _useExactTimeCodes;
+    [ObservableProperty] private bool _canExtractTimeCodes;
+    [ObservableProperty] private bool _isExtractingTimeCodes;
+    [ObservableProperty] private double _extractProgressValue;
+    [ObservableProperty] private string _timeCodesStatus = string.Empty;
+
+    public BeautifyTimeCodesViewModel(IWindowService windowService)
+    {
+        _windowService = windowService;
+        _allSubtitles = new List<SubtitleLineViewModel>();
+        _originalSubtitles = new List<SubtitleLineViewModel>();
+        _beautifiedSubtitles = new List<SubtitleLineViewModel>();
+        _shotChanges = new List<double>();
+        _timeCodes = new List<double>();
+
+        _timerUpdatePreview = new System.Timers.Timer(500);
+        _timerUpdatePreview.AutoReset = false;
+        _timerUpdatePreview.Elapsed += TimerUpdatePreviewElapsed;
+    }
+
+    private void TimerUpdatePreviewElapsed(object? sender, System.Timers.ElapsedEventArgs e)
+    {
+        // Dispose() (wired from the window's Closing) may run on the UI thread while this handler
+        // runs on a thread-pool thread; Start() on the disposed timer throws ObjectDisposedException
+        // (no longer swallowed on modern .NET), so bail out and never restart once disposed. (#12739)
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (!_dirty || _updateInProgress)
+        {
+            if (!_disposed)
+            {
+                _timerUpdatePreview.Start();
+            }
+
+            return;
+        }
+
+        lock (_timerLock)
+        {
+            if (!_dirty || _updateInProgress)
+            {
+                if (!_disposed)
+                {
+                    _timerUpdatePreview.Start();
+                }
+
+                return;
+            }
+
+            _dirty = false;
+            _updateInProgress = true;
+        }
+
+        UpdatePreview();
+    }
+
+    private void UpdatePreview()
+    {
+        if (AudioVisualizerBeautified == null || _allSubtitles.Count == 0)
+        {
+            _updateInProgress = false;
+            if (!_disposed)
+            {
+                _timerUpdatePreview.Start();
+            }
+            return;
+        }
+
+        // Build a Subtitle from the current row values and run the full libse
+        // beautifier — it reads the profile directly from Configuration.Settings.BeautifyTimeCodes.
+        var subtitle = BuildSubtitleFromRows();
+
+        var beautifier = new Core.Forms.TimeCodesBeautifier(subtitle, _frameRate, ActiveTimeCodes(), _shotChanges);
+        beautifier.Beautify();
+
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            if (!_disposed && AudioVisualizerBeautified != null)
+            {
+                _beautifiedSubtitles.Clear();
+                var subRipFormat = new SubRip();
+                for (int i = 0; i < subtitle.Paragraphs.Count; i++)
+                {
+                    var p = subtitle.Paragraphs[i];
+                    var vm = new SubtitleLineViewModel(p, subRipFormat) { Number = i + 1 };
+                    _beautifiedSubtitles.Add(vm);
+                }
+
+                // Push the paragraphs into the visualizer's _displayableParagraphs via SetPosition.
+                PushParagraphsToVisualizers();
+                RecomputeChanges();
+            }
+
+            _updateInProgress = false;
+            if (!_disposed)
+            {
+                _timerUpdatePreview.Start();
+            }
+        });
+    }
+
+    private void PushParagraphsToVisualizers()
+    {
+        if (AudioVisualizerOriginal != null)
+        {
+            AudioVisualizerOriginal.SetPosition(
+                AudioVisualizerOriginal.StartPositionSeconds,
+                _originalSubtitles,
+                AudioVisualizerOriginal.CurrentVideoPositionSeconds,
+                -1,
+                new List<SubtitleLineViewModel>());
+        }
+
+        if (AudioVisualizerBeautified != null)
+        {
+            AudioVisualizerBeautified.SetPosition(
+                AudioVisualizerBeautified.StartPositionSeconds,
+                _beautifiedSubtitles,
+                AudioVisualizerBeautified.CurrentVideoPositionSeconds,
+                -1,
+                new List<SubtitleLineViewModel>());
+        }
+    }
+
+    /// <summary>Walk original vs beautified and rebuild the navigable list of differences.</summary>
+    private void RecomputeChanges()
+    {
+        _changedIndices.Clear();
+
+        var n = Math.Min(_originalSubtitles.Count, _beautifiedSubtitles.Count);
+        for (var i = 0; i < n; i++)
+        {
+            var o = _originalSubtitles[i];
+            var b = _beautifiedSubtitles[i];
+            if (Math.Abs(o.StartTime.TotalMilliseconds - b.StartTime.TotalMilliseconds) > 0.5 ||
+                Math.Abs(o.EndTime.TotalMilliseconds - b.EndTime.TotalMilliseconds) > 0.5)
+            {
+                _changedIndices.Add(i);
+            }
+        }
+
+        HasChanges = _changedIndices.Count > 0;
+        if (_currentChangeIndex < 0 || _currentChangeIndex >= _changedIndices.Count)
+        {
+            _currentChangeIndex = _changedIndices.Count > 0 ? 0 : -1;
+        }
+
+        UpdateStatsLine();
+        UpdateChangeView();
+    }
+
+    private void UpdateStatsLine()
+    {
+        var lang = Se.Language.Tools.BeautifyTimeCodes;
+        var fps = _frameRate.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+
+        // With exact time codes the frame grid comes from the video, so showing only the nominal
+        // frame rate would misrepresent what the cues are being snapped to.
+        var frameSource = UseExactTimeCodes && _timeCodes.Count > 0
+            ? $"{fps} ({lang.UseExactTimeCodes})"
+            : fps;
+
+        StatsLine = $"{lang.SubtitlesCount}: {_originalSubtitles.Count}   ·   " +
+                    $"{lang.ChangedCount}: {_changedIndices.Count}   ·   " +
+                    $"{Se.Language.General.FrameRate}: {frameSource}   ·   " +
+                    $"{lang.ShotChangesCount}: {_shotChanges.Count}";
+    }
+
+    private void UpdateChangeView()
+    {
+        if (_currentChangeIndex < 0 || _changedIndices.Count == 0)
+        {
+            ChangePositionLabel = string.Empty;
+            ChangeDetail = Se.Language.Tools.BeautifyTimeCodes.NoChanges;
+            ChangeNotes = string.Empty;
+            CanGoPrevious = false;
+            CanGoNext = false;
+            if (AudioVisualizerOriginal != null)
+            {
+                AudioVisualizerOriginal.AllSelectedParagraphs = new List<SubtitleLineViewModel>();
+            }
+            if (AudioVisualizerBeautified != null)
+            {
+                AudioVisualizerBeautified.AllSelectedParagraphs = new List<SubtitleLineViewModel>();
+            }
+            return;
+        }
+
+        CanGoPrevious = _currentChangeIndex > 0;
+        CanGoNext = _currentChangeIndex < _changedIndices.Count - 1;
+        ChangePositionLabel = string.Format(
+            Se.Language.Tools.BeautifyTimeCodes.ChangeXOfY,
+            _currentChangeIndex + 1, _changedIndices.Count);
+
+        var idx = _changedIndices[_currentChangeIndex];
+        var o = _originalSubtitles[idx];
+        var b = _beautifiedSubtitles[idx];
+
+        ChangeDetail = BuildChangeDetail(o, b);
+        ChangeNotes = BuildChangeNotes(o, b);
+
+        // Center both visualizers on the *midpoint* of the (beautified) paragraph
+        var midSeconds = (b.StartTime.TotalSeconds + b.EndTime.TotalSeconds) / 2.0;
+        CenterVisualizerOn(AudioVisualizerOriginal, midSeconds);
+        CenterVisualizerOn(AudioVisualizerBeautified, midSeconds);
+
+        if (AudioVisualizerOriginal != null)
+        {
+            AudioVisualizerOriginal.SetPosition(
+                AudioVisualizerOriginal.StartPositionSeconds,
+                _originalSubtitles,
+                AudioVisualizerOriginal.CurrentVideoPositionSeconds,
+                idx,
+                new List<SubtitleLineViewModel>());
+            AudioVisualizerOriginal.InvalidateVisual();
+        }
+
+        if (AudioVisualizerBeautified != null)
+        {
+            AudioVisualizerBeautified.SetPosition(
+                AudioVisualizerBeautified.StartPositionSeconds,
+                _beautifiedSubtitles,
+                AudioVisualizerBeautified.CurrentVideoPositionSeconds,
+                idx,
+                new List<SubtitleLineViewModel>());
+            AudioVisualizerBeautified.InvalidateVisual();
+        }
+    }
+
+    private string BuildChangeDetail(SubtitleLineViewModel original, SubtitleLineViewModel beautified)
+    {
+        var sb = new System.Text.StringBuilder();
+
+        sb.Append('#').Append(beautified.Number).Append("   ");
+
+        var startDeltaMs = beautified.StartTime.TotalMilliseconds - original.StartTime.TotalMilliseconds;
+        if (Math.Abs(startDeltaMs) > 0.5)
+        {
+            sb.Append(Se.Language.General.StartTime).Append(": ")
+              .Append(FormatTime(original.StartTime))
+              .Append(" → ")
+              .Append(FormatTime(beautified.StartTime))
+              .Append("  ")
+              .Append(FormatDelta(startDeltaMs));
+        }
+
+        var endDeltaMs = beautified.EndTime.TotalMilliseconds - original.EndTime.TotalMilliseconds;
+        if (Math.Abs(endDeltaMs) > 0.5)
+        {
+            if (sb.Length > 6)
+            {
+                sb.Append("    ");
+            }
+            sb.Append(Se.Language.General.EndTime).Append(": ")
+              .Append(FormatTime(original.EndTime))
+              .Append(" → ")
+              .Append(FormatTime(beautified.EndTime))
+              .Append("  ")
+              .Append(FormatDelta(endDeltaMs));
+        }
+
+        return sb.ToString();
+    }
+
+    private string BuildChangeNotes(SubtitleLineViewModel original, SubtitleLineViewModel beautified)
+    {
+        var lang = Se.Language.Tools.BeautifyTimeCodes;
+        var idx = _beautifiedSubtitles.IndexOf(beautified);
+        var prevB = idx > 0 ? _beautifiedSubtitles[idx - 1] : null;
+        var nextB = (idx >= 0 && idx < _beautifiedSubtitles.Count - 1) ? _beautifiedSubtitles[idx + 1] : null;
+
+        var parts = new System.Collections.Generic.List<string>();
+
+        var startChanged = Math.Abs(beautified.StartTime.TotalMilliseconds - original.StartTime.TotalMilliseconds) > 0.5;
+        if (startChanged)
+        {
+            var reason = DetectStartReason(original, beautified, prevB) ?? lang.NoReasonNote;
+            parts.Add(Se.Language.General.StartTime + ": " + reason);
+        }
+
+        var endChanged = Math.Abs(beautified.EndTime.TotalMilliseconds - original.EndTime.TotalMilliseconds) > 0.5;
+        if (endChanged)
+        {
+            var reason = DetectEndReason(original, beautified, nextB) ?? lang.NoReasonNote;
+            parts.Add(Se.Language.General.EndTime + ": " + reason);
+        }
+
+        // Duration reason — applies regardless of which side moved
+        var durationReason = DetectDurationReason(original, beautified);
+        if (durationReason != null)
+        {
+            parts.Add(Se.Language.General.Duration + ": " + durationReason);
+        }
+
+        return string.Join("    ·    ", parts);
+    }
+
+    private string? DetectStartReason(SubtitleLineViewModel original, SubtitleLineViewModel beautified, SubtitleLineViewModel? prev)
+    {
+        if (_frameRate <= 0)
+        {
+            return null;
+        }
+
+        var snap = DetectShotChangeSnap(beautified.StartTime, isOutCue: false);
+        if (snap != null)
+        {
+            return snap;
+        }
+
+        // Min-gap-to-previous: new start equals previous end + min-gap
+        if (prev != null)
+        {
+            var minGapMs = Configuration.Settings.General.MinimumMillisecondsBetweenLines;
+            var expected = prev.EndTime.TotalMilliseconds + minGapMs;
+            var halfFrame = (1.0 / _frameRate) * 500.0;
+            if (Math.Abs(beautified.StartTime.TotalMilliseconds - expected) <= halfFrame)
+            {
+                return Se.Language.Tools.BeautifyTimeCodes.MinGapEnforced;
+            }
+        }
+
+        return DetectFrameSnap(original.StartTime, beautified.StartTime);
+    }
+
+    private string? DetectEndReason(SubtitleLineViewModel original, SubtitleLineViewModel beautified, SubtitleLineViewModel? next)
+    {
+        if (_frameRate <= 0)
+        {
+            return null;
+        }
+
+        var snap = DetectShotChangeSnap(beautified.EndTime, isOutCue: true);
+        if (snap != null)
+        {
+            return snap;
+        }
+
+        if (next != null)
+        {
+            var minGapMs = Configuration.Settings.General.MinimumMillisecondsBetweenLines;
+            var expected = next.StartTime.TotalMilliseconds - minGapMs;
+            var halfFrame = (1.0 / _frameRate) * 500.0;
+            if (Math.Abs(beautified.EndTime.TotalMilliseconds - expected) <= halfFrame)
+            {
+                return Se.Language.Tools.BeautifyTimeCodes.MinGapEnforced;
+            }
+        }
+
+        return DetectFrameSnap(original.EndTime, beautified.EndTime);
+    }
+
+    private string? DetectShotChangeSnap(TimeSpan beautifiedT, bool isOutCue)
+    {
+        if (_shotChanges.Count == 0 || _frameRate <= 0)
+        {
+            return null;
+        }
+
+        var oneFrame = 1.0 / _frameRate;
+        var refSec = isOutCue ? beautifiedT.TotalSeconds + oneFrame : beautifiedT.TotalSeconds;
+        foreach (var sc in _shotChanges)
+        {
+            if (Math.Abs(sc - refSec) <= oneFrame)
+            {
+                return Se.Language.Tools.BeautifyTimeCodes.SnappedToShotChange;
+            }
+        }
+        return null;
+    }
+
+    private string? DetectFrameSnap(TimeSpan originalT, TimeSpan beautifiedT)
+    {
+        var origFrames = originalT.TotalSeconds * _frameRate;
+        var newFrames = beautifiedT.TotalSeconds * _frameRate;
+        var origAligned = Math.Abs(origFrames - Math.Round(origFrames)) < 0.05;
+        var newAligned = Math.Abs(newFrames - Math.Round(newFrames)) < 0.05;
+        if (newAligned && !origAligned)
+        {
+            return Se.Language.Tools.BeautifyTimeCodes.SnappedToFrame;
+        }
+        return null;
+    }
+
+    private string? DetectDurationReason(SubtitleLineViewModel original, SubtitleLineViewModel beautified)
+    {
+        var newDuration = beautified.EndTime.TotalMilliseconds - beautified.StartTime.TotalMilliseconds;
+        var oldDuration = original.EndTime.TotalMilliseconds - original.StartTime.TotalMilliseconds;
+        if (Math.Abs(newDuration - oldDuration) < 1.0)
+        {
+            return null; // duration didn't change meaningfully
+        }
+
+        var minMs = Configuration.Settings.General.SubtitleMinimumDisplayMilliseconds;
+        var maxMs = Configuration.Settings.General.SubtitleMaximumDisplayMilliseconds;
+        var tol = _frameRate > 0 ? 1000.0 / _frameRate * 0.5 : 5.0; // half-frame tolerance
+
+        if (oldDuration < minMs && Math.Abs(newDuration - minMs) <= tol)
+        {
+            return Se.Language.Tools.BeautifyTimeCodes.MinDurationEnforced;
+        }
+        if (oldDuration > maxMs && Math.Abs(newDuration - maxMs) <= tol)
+        {
+            return Se.Language.Tools.BeautifyTimeCodes.MaxDurationEnforced;
+        }
+
+        return null;
+    }
+
+    private string FormatTime(TimeSpan t) =>
+        $"{(int)t.TotalHours:D2}:{t.Minutes:D2}:{t.Seconds:D2},{t.Milliseconds:D3}";
+
+    private string FormatDelta(double ms)
+    {
+        var sign = ms >= 0 ? "+" : "−"; // U+2212 minus for nicer look
+        var absMs = Math.Abs(ms);
+        if (_frameRate > 0)
+        {
+            var frames = absMs * _frameRate / 1000.0;
+            return $"({sign}{absMs:0} ms / {sign}{frames:0.#} f)";
+        }
+        return $"({sign}{absMs:0} ms)";
+    }
+
+    private void CenterVisualizerOn(Controls.AudioVisualizerControl.AudioVisualizer? av, double seconds)
+    {
+        if (av == null)
+        {
+            return;
+        }
+
+        var peaks = av.WavePeaks;
+        if (peaks == null || av.Bounds.Width <= 0 || av.ZoomFactor <= 0)
+        {
+            return;
+        }
+
+        var visibleSeconds = av.Bounds.Width / (av.ZoomFactor * peaks.SampleRate);
+        av.StartPositionSeconds = Math.Max(0, seconds - visibleSeconds / 2.0);
+    }
+
+    public void Initialize(List<SubtitleLineViewModel> subtitles, Controls.AudioVisualizerControl.AudioVisualizer audioVisualizer, string videoFileName)
+    {
+        _allSubtitles.Clear();
+        _allSubtitles.AddRange(subtitles.Select(p => new SubtitleLineViewModel(p)));
+
+        _originalSubtitles.Clear();
+        _originalSubtitles.AddRange(subtitles.Select(p => new SubtitleLineViewModel(p)));
+
+        _shotChanges = audioVisualizer.ShotChanges ?? new List<double>();
+
+        _frameRate = 25.0;
+        _videoDurationSeconds = 0;
+        _videoFileName = string.Empty;
+        if (!string.IsNullOrEmpty(videoFileName) && System.IO.File.Exists(videoFileName))
+        {
+            _videoFileName = videoFileName;
+            try
+            {
+                var mediaInfo = Logic.Media.FfmpegMediaInfo2.Parse(videoFileName);
+                if (mediaInfo.FramesRate > 0)
+                {
+                    _frameRate = (double)mediaInfo.FramesRate;
+                }
+
+                _videoDurationSeconds = mediaInfo.Duration?.TotalSeconds ?? 0;
+            }
+            catch
+            {
+                // fall back to 25 fps
+            }
+        }
+
+        // Extracting time codes means decoding the whole video, so a previous run is reused.
+        _timeCodes = new List<double>();
+        try
+        {
+            _timeCodes = Logic.Media.TimeCodesHelper.FromDisk(_videoFileName);
+        }
+        catch (Exception exception)
+        {
+            Se.LogError(exception, "Reading cached video time codes failed");
+        }
+
+        if (!Logic.Media.TimeCodesHelper.IsUsableFor(_timeCodes, _videoDurationSeconds))
+        {
+            _timeCodes = new List<double>();
+        }
+
+        UseExactTimeCodes = Se.Settings.BeautifyTimeCodes.ExtractExactTimeCodes && _timeCodes.Count > 0;
+        UpdateTimeCodesStatus();
+        UpdateStatsLine();
+
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            if (AudioVisualizerOriginal == null || AudioVisualizerBeautified == null)
+            {
+                return;
+            }
+
+            AudioVisualizerOriginal.WavePeaks = audioVisualizer.WavePeaks;
+            AudioVisualizerOriginal.ShotChanges = new List<double>(_shotChanges);
+            AudioVisualizerOriginal.StartPositionSeconds = audioVisualizer.StartPositionSeconds;
+            AudioVisualizerOriginal.ZoomFactor = audioVisualizer.ZoomFactor;
+            AudioVisualizerOriginal.VerticalZoomFactor = audioVisualizer.VerticalZoomFactor;
+            AudioVisualizerOriginal.UpdateTheme();
+
+            AudioVisualizerBeautified.WavePeaks = audioVisualizer.WavePeaks;
+            AudioVisualizerBeautified.ShotChanges = new List<double>(_shotChanges);
+            AudioVisualizerBeautified.StartPositionSeconds = audioVisualizer.StartPositionSeconds;
+            AudioVisualizerBeautified.ZoomFactor = audioVisualizer.ZoomFactor;
+            AudioVisualizerBeautified.VerticalZoomFactor = audioVisualizer.VerticalZoomFactor;
+            AudioVisualizerBeautified.UpdateTheme();
+
+            // Push original paragraphs immediately so the user sees them while the
+            // first beautify pass runs in the background.
+            AudioVisualizerOriginal.SetPosition(
+                AudioVisualizerOriginal.StartPositionSeconds,
+                _originalSubtitles,
+                AudioVisualizerOriginal.CurrentVideoPositionSeconds,
+                -1,
+                new List<SubtitleLineViewModel>());
+
+            _dirty = true;
+            AudioVisualizerOriginal.InvalidateVisual();
+            AudioVisualizerBeautified.InvalidateVisual();
+
+            if (!_disposed)
+            {
+                _timerUpdatePreview.Start();
+                StartPositionTimer();
+            }
+        });
+    }
+
+    private void StartPositionTimer()
+    {
+        _positionTimer = new UiTickPump(TimeSpan.FromMilliseconds(100));
+        _positionTimer.Tick += (s, e) =>
+        {
+            if (AudioVisualizerOriginal != null && AudioVisualizerBeautified != null)
+            {
+                AudioVisualizerBeautified.CurrentVideoPositionSeconds = AudioVisualizerOriginal.CurrentVideoPositionSeconds;
+                AudioVisualizerOriginal.InvalidateVisual();
+                AudioVisualizerBeautified.InvalidateVisual();
+            }
+        };
+        _positionTimer.Start();
+    }
+
+    private void StopPositionTimer()
+    {
+        if (_positionTimer != null)
+        {
+            _positionTimer.Stop();
+            _positionTimer = null;
+        }
+    }
+
+    [RelayCommand]
+    private async Task EditProfile()
+    {
+        if (Window == null)
+        {
+            return;
+        }
+
+        var result = await _windowService.ShowDialogAsync<BeautifyTimeCodesProfileWindow, BeautifyTimeCodesProfileViewModel>(Window, vm =>
+        {
+            vm.Initialize();
+        });
+
+        if (result.OkPressed)
+        {
+            _dirty = true; // re-run beautify with the new profile
+        }
+    }
+
+    /// <summary>
+    /// The time codes the beautifier should use. Empty unless the user asked for exact time codes
+    /// and a usable set is loaded - the beautifier then falls back to n/fps arithmetic.
+    /// </summary>
+    private List<double> ActiveTimeCodes()
+    {
+        return UseExactTimeCodes ? _timeCodes : NoTimeCodes;
+    }
+
+    partial void OnUseExactTimeCodesChanged(bool value)
+    {
+        Se.Settings.BeautifyTimeCodes.ExtractExactTimeCodes = value;
+        // Mirror into libse too: the profile dialog does
+        // Se.Settings.BeautifyTimeCodes.CopyFrom(Configuration.Settings.BeautifyTimeCodes),
+        // so leaving the libse copy stale let opening that dialog revert this tick.
+        Configuration.Settings.BeautifyTimeCodes.ExtractExactTimeCodes = value;
+        UpdateTimeCodesStatus();
+        _dirty = true; // re-run beautify against the other frame grid
+    }
+
+    private void UpdateTimeCodesStatus()
+    {
+        var lang = Se.Language.Tools.BeautifyTimeCodes;
+
+        if (IsExtractingTimeCodes)
+        {
+            TimeCodesStatus = lang.ExtractingTimeCodes;
+        }
+        else
+        {
+            TimeCodesStatus = _timeCodes.Count > 0
+                ? string.Format(lang.XTimeCodesLoaded, _timeCodes.Count)
+                : lang.NoTimeCodesLoaded;
+        }
+
+        CanExtractTimeCodes = !IsExtractingTimeCodes &&
+                              _timeCodes.Count == 0 &&
+                              !string.IsNullOrEmpty(_videoFileName);
+
+        UpdateStatsLine();
+    }
+
+    [RelayCommand]
+    private async Task ExtractTimeCodes()
+    {
+        if (IsExtractingTimeCodes || string.IsNullOrEmpty(_videoFileName))
+        {
+            return;
+        }
+
+        IsExtractingTimeCodes = true;
+        ExtractProgressValue = 0;
+        UpdateTimeCodesStatus();
+
+        using var cancellationSource = new CancellationTokenSource();
+        _extractCancellation = cancellationSource;
+
+        var progress = new Progress<int>(percent =>
+        {
+            if (!_disposed)
+            {
+                ExtractProgressValue = percent;
+            }
+        });
+
+        var extracted = new List<double>();
+        try
+        {
+            extracted = await TimeCodesGenerator.ExtractAsync(_videoFileName, _videoDurationSeconds, progress, cancellationSource.Token);
+        }
+        catch (Exception exception)
+        {
+            Se.LogError(exception, "Extracting video time codes failed");
+        }
+
+        // Read the flag while the source is still alive, then unpublish it so Dispose() cannot
+        // reach the instance this method is about to dispose.
+        var cancelled = cancellationSource.IsCancellationRequested;
+        _extractCancellation = null;
+        IsExtractingTimeCodes = false;
+
+        // A completed run decoded the whole video, so its last frame time is the real duration -
+        // this keeps completed extractions usable when ffmpeg reported no duration up front
+        // (IsUsableFor rejects any list it cannot check against a known length).
+        if (!cancelled && _videoDurationSeconds <= 0 && extracted.Count > 0)
+        {
+            _videoDurationSeconds = extracted[extracted.Count - 1];
+        }
+
+        // A short list is worse than none: the beautifier maps frame number to list index, so cues
+        // past the end of a partial extraction would snap to the wrong frames rather than fall
+        // back to n/fps. Cancelling mid-way lands here too.
+        if (TimeCodesHelper.IsUsableFor(extracted, _videoDurationSeconds))
+        {
+            _timeCodes = extracted;
+            try
+            {
+                TimeCodesHelper.Save(_videoFileName, extracted);
+            }
+            catch (Exception exception)
+            {
+                Se.LogError(exception, "Saving video time codes failed");
+            }
+
+            UseExactTimeCodes = true;
+            _dirty = true; // OnUseExactTimeCodesChanged does not fire if the box was already ticked
+        }
+        else if (!cancelled)
+        {
+            TimeCodesStatus = Se.Language.Tools.BeautifyTimeCodes.TimeCodesExtractFailed;
+            CanExtractTimeCodes = !string.IsNullOrEmpty(_videoFileName);
+            return;
+        }
+
+        UpdateTimeCodesStatus();
+    }
+
+    [RelayCommand]
+    private void PreviousChange()
+    {
+        if (_currentChangeIndex > 0)
+        {
+            _currentChangeIndex--;
+            UpdateChangeView();
+        }
+    }
+
+    [RelayCommand]
+    private void NextChange()
+    {
+        if (_currentChangeIndex < _changedIndices.Count - 1)
+        {
+            _currentChangeIndex++;
+            UpdateChangeView();
+        }
+    }
+
+    private void FirstChange()
+    {
+        if (_changedIndices.Count > 0 && _currentChangeIndex != 0)
+        {
+            _currentChangeIndex = 0;
+            UpdateChangeView();
+        }
+    }
+
+    private void LastChange()
+    {
+        var last = _changedIndices.Count - 1;
+        if (last >= 0 && _currentChangeIndex != last)
+        {
+            _currentChangeIndex = last;
+            UpdateChangeView();
+        }
+    }
+
+    [RelayCommand]
+    private void Ok()
+    {
+        StopPositionTimer();
+        _timerUpdatePreview.StopAndDispose(TimerUpdatePreviewElapsed);
+
+        CommitBeautifiedTimes(_allSubtitles, _frameRate, _shotChanges, ActiveTimeCodes());
+
+        OkPressed = true;
+        Window?.Close();
+    }
+
+    /// <summary>
+    /// Runs the final beautify and writes the new times back onto the existing rows (sorted by
+    /// start time, as the beautifier expects). The rows keep all their view-model-only state -
+    /// the previous rebuild from Paragraphs silently dropped OriginalText, Id and the ASSA style.
+    /// </summary>
+    internal static void CommitBeautifiedTimes(List<SubtitleLineViewModel> rows, double frameRate, List<double> shotChanges, List<double>? timeCodes = null)
+    {
+        var ordered = rows.OrderBy(p => p.StartTime.TotalMilliseconds).ToList();
+        var subtitle = new Subtitle();
+        foreach (var vm in ordered)
+        {
+            subtitle.Paragraphs.Add(vm.ToParagraph());
+        }
+
+        var beautifier = new Core.Forms.TimeCodesBeautifier(subtitle, frameRate, timeCodes ?? new List<double>(), shotChanges);
+        beautifier.Beautify();
+
+        // Beautify adjusts cue boundaries only, so the paragraphs still line up with the rows.
+        for (var i = 0; i < ordered.Count && i < subtitle.Paragraphs.Count; i++)
+        {
+            ordered[i].StartTime = TimeSpan.FromMilliseconds(subtitle.Paragraphs[i].StartTime.TotalMilliseconds);
+            ordered[i].EndTime = TimeSpan.FromMilliseconds(subtitle.Paragraphs[i].EndTime.TotalMilliseconds);
+            ordered[i].UpdateDuration();
+        }
+
+        rows.Clear();
+        rows.AddRange(ordered);
+    }
+
+    [RelayCommand]
+    private void Cancel()
+    {
+        StopPositionTimer();
+        _timerUpdatePreview.StopAndDispose(TimerUpdatePreviewElapsed);
+        Window?.Close();
+    }
+
+    public List<SubtitleLineViewModel> GetBeautifiedSubtitles()
+    {
+        return new List<SubtitleLineViewModel>(_allSubtitles);
+    }
+
+    private Subtitle BuildSubtitleFromRows()
+    {
+        var subtitle = new Subtitle();
+        foreach (var p in _allSubtitles.Select(p => p.ToParagraph()).OrderBy(p => p.StartTime.TotalMilliseconds))
+        {
+            subtitle.Paragraphs.Add(p);
+        }
+
+        return subtitle;
+    }
+
+    internal void OnKeyDown(KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape)
+        {
+            e.Handled = true;
+            Cancel();
+        }
+        else if (UiUtil.IsHelp(e))
+        {
+            e.Handled = true;
+            UiUtil.ShowHelp("features/beautify-time-codes");
+        }
+        else if (e.KeyModifiers == KeyModifiers.None)
+        {
+            // Keyboard navigation between changes - the window has no text input, so the plain
+            // arrow/paging keys are free. Mirrors the ▲/▼ buttons in the change navigator.
+            switch (e.Key)
+            {
+                case Key.Up:
+                case Key.Left:
+                case Key.PageUp:
+                    e.Handled = true;
+                    PreviousChange();
+                    break;
+                case Key.Down:
+                case Key.Right:
+                case Key.PageDown:
+                    e.Handled = true;
+                    NextChange();
+                    break;
+                case Key.Home:
+                    e.Handled = true;
+                    FirstChange();
+                    break;
+                case Key.End:
+                    e.Handled = true;
+                    LastChange();
+                    break;
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        StopPositionTimer();
+        _timerUpdatePreview.StopAndDispose(TimerUpdatePreviewElapsed);
+
+        // Closing the window must not leave an ffmpeg decode of the whole video running. The
+        // extract command owns and disposes the source, so only signal it here.
+        try
+        {
+            _extractCancellation?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // the extraction finished between the null check and Cancel()
+        }
+    }
+}

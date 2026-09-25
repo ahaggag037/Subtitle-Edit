@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>SubtitleEdit</string>
+    <key>CFBundleIdentifier</key>
+    <string>dk.nikse.subtitleedit</string>
+    <key>CFBundleName</key>
+    <string>Subtitle Edit</string>
+    <key>CFBundleDisplayName</key>
+    <string>Subtitle Edit</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleSignature</key>
+    <string>SBED</string>
+    <key>CFBundleIconFile</key>
+    <string>SE.icns</string>
+    <!-- The technical floor, not the supported one, and deliberately so.
+         .NET 10 is supported on macOS 14, 15 and 26 (Microsoft tracks Apple's own
+         three-release window), and the docs recommend 14 for that reason. But the
+         runtime we ship is built against macOS 12 - LC_BUILD_VERSION minos 12.0 in
+         libcoreclr.dylib - so it does load on 12 and 13, and this key is what decides
+         whether LaunchServices lets it try. Declaring 14 here would refuse to start on
+         machines where SE runs fine today, so it stays at the floor: 12 and 13 users
+         keep a working app on an untested runtime configuration, rather than no app.
+         Re-derive after a TFM bump with:
+           otool -l .../shared/Microsoft.NETCore.App/<ver>/libcoreclr.dylib | grep -A3 LC_BUILD_VERSION
+         and keep it in step with README.md, docs/overview.md and docs/faq.md. -->
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.video</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>srt</string>
+                <string>ass</string>
+                <string>ssa</string>
+                <string>sub</string>
+                <string>sup</string>
+                <string>vtt</string>
+                <string>sbv</string>
+                <string>stl</string>
+                <string>ttml</string>
+                <string>dfxp</string>
+                <string>itt</string>
+                <string>smi</string>
+                <string>scc</string>
+                <string>mcc</string>
+                <string>cap</string>
+                <string>pac</string>
+                <string>lrc</string>
+                <string>idx</string>
+            </array>
+            <key>CFBundleTypeName</key>
+            <string>Subtitle Files</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+        </dict>
+        <!-- .xml is its own entry, at Alternate rank: SE reads several XML subtitle
+             formats, but claiming Owner made it fight every other app on the machine
+             for every XML file. Alternate keeps SE in "Open With" without taking the
+             default away from whatever owns the file type. -->
+        <dict>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>xml</string>
+            </array>
+            <key>CFBundleTypeName</key>
+            <string>XML Subtitle Files</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+        </dict>
+        <dict>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>mp4</string>
+                <string>mkv</string>
+                <string>avi</string>
+                <string>mov</string>
+                <string>wmv</string>
+                <string>flv</string>
+                <string>webm</string>
+                <string>m4v</string>
+            </array>
+            <key>CFBundleTypeName</key>
+            <string>Video Files</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+        </dict>
+    </array>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+</dict>
+</plist>
