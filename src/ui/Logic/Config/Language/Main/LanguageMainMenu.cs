@@ -131,6 +131,7 @@ public class LanguageMainMenu
     public string ChooseLanguage { get; set; }
 
     public string Translate { get; set; }
+    public string TranslateVideo { get; set; }
     public string AutoTranslate { get; set; }
     public string TranslateViaCopyPaste { get; set; }
 

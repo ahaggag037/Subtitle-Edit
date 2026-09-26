@@ -1,4 +1,4 @@
-﻿{
+{
   "title": "Subtitle Edit",
   "version": "v5.3.0-beta12",
   "translatedBy": "",
@@ -682,6 +682,7 @@
     "top": "Top",
     "totalAdjustmentX": "Total adjustment: {0}",
     "translate": "Translate",
+      "translateVideo": "Translate _video (guided)...",
     "translatePercentX": "Translating: {0}%",
     "translateRow": "Translate row",
     "translation": "Translation",
