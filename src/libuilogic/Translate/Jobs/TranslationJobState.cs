@@ -89,7 +89,7 @@ namespace Nikse.SubtitleEdit.UiLogic.Translate.Jobs
         public void Save()
         {
             UpdatedUtc = DateTime.UtcNow;
-            var path = StateFilePath ?? GetDefaultStateFilePath(OutputSrtPath);
+            var path = StateFilePath ?? GetDefaultStateFilePath(OutputSrtPath ?? string.Empty);
             StateFilePath = path;
             var folder = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(folder) && !Directory.Exists(folder))
