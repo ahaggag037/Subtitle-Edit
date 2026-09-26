@@ -1,12 +1,14 @@
 using System.Reflection;
 using System.Text;
 using Nikse.SubtitleEdit.Core.Common;
+using Nikse.SubtitleEdit.Core.Settings;
 using Nikse.SubtitleEdit.Core.SubtitleFormats;
 using Nikse.SubtitleEdit.UiLogic.AutoTranslate;
 using Nikse.SubtitleEdit.UiLogic.Translate;
 using Nikse.SubtitleEdit.UiLogic.Translate.Arabic;
 using Nikse.SubtitleEdit.UiLogic.Translate.Jobs;
 using Nikse.SubtitleEdit.UiLogic.Translate.Memory;
+using Nikse.SubtitleEdit.UiLogic.Translate.Qa;
 
 namespace LibUiLogicTests.Translate.Jobs
 {

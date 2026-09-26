@@ -367,7 +367,7 @@ public partial class TranslateVideoViewModel : ObservableObject
         {
             SourceLanguageCode = "en",
             SourceLanguageName = "English",
-            TargetLanguageCode = profile?.TargetLanguageCode ?? TwoLetterCodeOf(translator, SelectedTarget.Pair),
+            TargetLanguageCode = profile?.TargetLanguageCode ?? TwoLetterCodeOf(SelectedTarget.Pair),
             TargetLanguageName = SelectedTarget.Pair.Name,
             ArabicProfileId = profile?.Id,
             StylePromptAddendum = styleAddendum,
