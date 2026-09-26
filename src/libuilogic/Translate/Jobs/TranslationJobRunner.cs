@@ -164,7 +164,7 @@ namespace Nikse.SubtitleEdit.UiLogic.Translate.Jobs
         /// Runs the job on the given source subtitle. <paramref name="outputSrtPath"/> is optional;
         /// when set, an SRT file is written at the export stage and the checkpoint file lives next to it.
         /// </summary>
-        public async Task<TranslationJobResult> RunAsync(Subtitle sourceSubtitle, string? outputSrtPath, CancellationToken cancellationToken)
+        public async Task<TranslationJobResult> RunAsync(Subtitle? sourceSubtitle, string? outputSrtPath, CancellationToken cancellationToken)
         {
             var result = new TranslationJobResult();
             _stopwatch.Restart();
