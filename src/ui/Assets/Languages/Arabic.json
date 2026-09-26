@@ -1,4 +1,4 @@
-﻿{
+{
   "title": "العربية",
   "version": "v5.2.0-rc7",
   "translatedBy": "",
@@ -714,6 +714,7 @@
     "totalLengthX": "الطول الإجمالي: {0}",
     "totalLengthXSplitLine": "الطول الإجمالي: {0} (تقسيم السطر!)",
     "translate": "ترجمة",
+      "translateVideo": "ترجمة _فيديو (موجَّه)...",
     "translatePercentX": "جارٍ الترجمة: {0}%",
     "translateRow": "ترجمة الصف",
     "translation": "الترجمة",

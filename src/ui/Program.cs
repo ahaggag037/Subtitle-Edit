@@ -112,6 +112,9 @@ namespace Nikse.SubtitleEdit
                 SpellCheckConfig.TreatInApostropheAsIng = () => Se.Settings.Tools.SpellCheckEnglishTreatInApostropheAsIng;
                 SpellCheckConfig.LogError = msg => Se.LogError(msg);
 
+                // The shared translation memory (libuilogic) stores its file in the app data folder.
+                Nikse.SubtitleEdit.UiLogic.Translate.Memory.TranslationMemory.DefaultFolderPathProvider = () => Se.DataFolder;
+
                 // Load the UI translation before any window or the macOS native menu bar is built,
                 // so the menu bar isn't constructed with the default English strings (issue #11505).
                 Se.LoadLanguage();

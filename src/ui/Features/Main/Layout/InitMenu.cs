@@ -1,4 +1,4 @@
-﻿using Avalonia;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Data;
 using Avalonia.Data.Converters;
@@ -898,6 +898,11 @@ public static class InitMenu
             Header = l.Translate,
             Items =
             {
+                new MenuItem
+                {
+                    Header = l.TranslateVideo,
+                    Command = vm.ShowTranslateVideoCommand,
+                },
                 new MenuItem
                 {
                     Header = l.AutoTranslate,
