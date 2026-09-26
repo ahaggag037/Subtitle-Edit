@@ -164,7 +164,7 @@ public class TranslateVideoWindow : Window
 
         var grid = new Grid
         {
-            RowDefinitions = new RowDefinitions("* ,Auto"),
+            RowDefinitions = new RowDefinitions("*,Auto"),
             RowSpacing = 10,
         };
         grid.Children.Add(scroll);
