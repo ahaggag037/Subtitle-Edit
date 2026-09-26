@@ -133,7 +133,7 @@ namespace Nikse.SubtitleEdit.UiLogic.Translate.Qa
                         ? (ICalcLength)new CalcIgnoreArabicDiacritics()
                         : new CalcAll();
                     var characters = calculator.CountCharacters(text, true);
-                    var cps = characters / durationSeconds;
+                    var cps = (double)characters / durationSeconds;
                     if (cps > settings.MaxCharactersPerSecond)
                     {
                         result.Issues.Add(new QaIssue(QaCheckIds.ReadingSpeed, QaSeverity.Warning, index, number,
