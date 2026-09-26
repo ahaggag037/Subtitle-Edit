@@ -43,6 +43,14 @@ namespace Nikse.SubtitleEdit.UiLogic.Translate.Jobs
         /// <summary>Suggested output SRT path.</summary>
         public string? OutputSrtPath { get; set; }
 
+        /// <summary>
+        /// Content fingerprint of the source subtitle the rows were built from (cue numbers,
+        /// timing and text). Used on resume to refuse combining this state with a different
+        /// input file - a checkpoint must never silently continue a different job. Null on
+        /// states created before this field existed (those resume without the check).
+        /// </summary>
+        public string? SourceSignature { get; set; }
+
         public string? ErrorMessage { get; set; }
 
         public string? ErrorTechnical { get; set; }
@@ -61,7 +69,10 @@ namespace Nikse.SubtitleEdit.UiLogic.Translate.Jobs
                     return false;
                 }
 
-                if (Stage == TranslationJobStage.Completed || Stage == TranslationJobStage.Failed)
+                // A completed job has nothing left to do. Failed and cancelled jobs ARE
+                // resumable when untranslated rows remain - resuming after a failure (e.g.
+                // the network came back) is the primary resume scenario.
+                if (Stage == TranslationJobStage.Completed)
                 {
                     return false;
                 }

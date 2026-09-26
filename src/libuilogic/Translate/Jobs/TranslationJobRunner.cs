@@ -1,4 +1,7 @@
 using System.Diagnostics;
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using Nikse.SubtitleEdit.Core.Common;
 using Nikse.SubtitleEdit.Core.SubtitleFormats;
 using Nikse.SubtitleEdit.UiLogic.AutoTranslate;
@@ -186,6 +189,26 @@ namespace Nikse.SubtitleEdit.UiLogic.Translate.Jobs
                             EndMilliseconds = p.EndTime.TotalMilliseconds,
                             SourceText = p.Text ?? string.Empty,
                         });
+                    }
+
+                    State.InputSubtitlePath = sourceSubtitle.FileName;
+                    State.SourceSignature = ComputeSourceSignature(sourceSubtitle);
+                }
+                else if (sourceSubtitle != null && Rows.Count > 0)
+                {
+                    // Resume with an explicit source: refuse to mix this checkpoint with a
+                    // different input file. Checked BEFORE any checkpoint write, so the saved
+                    // state on disk stays coherent and resumable with the correct source.
+                    var incomingSignature = ComputeSourceSignature(sourceSubtitle);
+                    if (!string.IsNullOrEmpty(State.SourceSignature) && State.SourceSignature != incomingSignature)
+                    {
+                        result.Error = new JobErrorInfo("This checkpoint belongs to a different subtitle.",
+                            "The saved progress was created from another subtitle/transcript than the one given now (content fingerprint mismatch).",
+                            "Resume with the original subtitle file, or delete the checkpoint file ("
+                            + (State.StateFilePath ?? "<output>.job.json") + ") to start this subtitle from scratch.",
+                            null);
+                        result.Rows = Rows;
+                        return result;
                     }
                 }
 
@@ -429,6 +452,31 @@ namespace Nikse.SubtitleEdit.UiLogic.Translate.Jobs
             }
 
             return subtitle;
+        }
+
+        /// <summary>
+        /// Stable content fingerprint of a subtitle (number, timing and text of every cue),
+        /// used to detect resume attempts against a different input file.
+        /// </summary>
+        internal static string ComputeSourceSignature(Subtitle subtitle)
+        {
+            var sb = new StringBuilder();
+            foreach (var p in subtitle.Paragraphs)
+            {
+                sb.Append(p.Number).Append('|')
+                  .Append(p.StartTime.TotalMilliseconds.ToString("0.###", CultureInfo.InvariantCulture)).Append('|')
+                  .Append(p.EndTime.TotalMilliseconds.ToString("0.###", CultureInfo.InvariantCulture)).Append('|')
+                  .AppendLine(p.Text ?? string.Empty);
+            }
+
+            var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()));
+            var hex = new StringBuilder(bytes.Length * 2);
+            foreach (var b in bytes)
+            {
+                hex.Append(b.ToString("x2", CultureInfo.InvariantCulture));
+            }
+
+            return hex.ToString();
         }
     }
 }
